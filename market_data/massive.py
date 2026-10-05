@@ -234,10 +234,34 @@ def download(client, req, data_dir=DATA_DIR, log=print, progress=None):
     return out
 
 
+FREQ_UNITS = {"second": "s", "minute": "min", "hour": "h"}
+
+
+def fill_gaps(df, freq):
+    """补齐没有成交的空缺 K 线，使时间等间隔。
+    只在每天每个时段的第一根和最后一根之间补（不跨日、不跨时段，提前收盘的日子也不会多补）。
+    补出的 K 线: open/high/low/close/vwap 都等于上一根的收盘价，volume 和 trades 为 0。"""
+    parts = []
+    for (_, session), g in df.groupby([df.index.date, df["session"]], sort=False):
+        full = pd.date_range(g.index[0], g.index[-1], freq=freq, name=df.index.name)
+        g = g.reindex(full)
+        close = g["close"].ffill()
+        for col in ("open", "high", "low", "vwap"):
+            g[col] = g[col].fillna(close)
+        g["close"] = close
+        g[["volume", "trades"]] = g[["volume", "trades"]].fillna(0)
+        g["session"] = session
+        parts.append(g)
+    if not parts:
+        return df
+    return pd.concat(parts).sort_index().astype(df.dtypes.to_dict())
+
+
 def load_bars(ticker, span_name="1second", start=None, end=None, sessions=None,
-              adjusted=True, data_dir=DATA_DIR):
+              adjusted=True, data_dir=DATA_DIR, fill=False):
     """读取 K 线数据。start/end 为日期字符串（含两端），sessions 如 {"regular"}。
-    只读取所需日期范围，不会把整个大文件读进内存。"""
+    只读取所需日期范围，不会把整个大文件读进内存。
+    fill=True 时补齐没有成交的空缺 K 线（仅日内周期，见 fill_gaps），可用 volume == 0 识别补出的行。"""
     base = dataset_base(data_dir, ticker.upper(), span_name, adjusted)
     if base.is_dir():   # 秒线：只读涉及到的月份文件
         lo = pd.Timestamp(start).strftime("%Y-%m") if start else ""
@@ -255,4 +279,10 @@ def load_bars(ticker, span_name="1second", start=None, end=None, sessions=None,
     frames = [pd.read_parquet(p, filters=filters or None) for p in paths]
     if not frames:
         raise FileNotFoundError(f"没有找到数据: {base}")
-    return pd.concat(frames)
+    df = pd.concat(frames)
+    if fill:
+        n = len(span_name.rstrip("abcdefghijklmnopqrstuvwxyz"))
+        unit = FREQ_UNITS.get(span_name[n:])
+        if unit:   # 日线及以上不补
+            df = fill_gaps(df, f"{span_name[:n]}{unit}")
+    return df

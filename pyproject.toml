@@ -1,0 +1,115 @@
+[project]
+name = "trader"
+version = "0.1.0"
+description = "个人美股日内交易系统：研究版与实盘版共用一份核心代码"
+requires-python = ">=3.12"
+# core 依赖组：两个应用都需要
+dependencies = [
+    "exchange-calendars",
+]
+
+[project.optional-dependencies]
+# 只属于研究版（阶段 1 起按需添加）
+research = []
+# 只属于实盘版，尽量不加
+live = []
+
+[project.scripts]
+trader-research = "trader.apps.research_app:main"
+trader-live = "trader.apps.live_app:main"
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "ruff",
+    "pyright",
+    "import-linter",
+]
+# 现有的 Massive 下载工具（download_gui.py）和 Jupyter 内核，阶段 1 并入 trader.data 后再整理
+tools = [
+    "requests",
+    "pandas",
+    "pyarrow",
+    "PySide6",
+    "ipykernel",
+]
+
+[tool.uv]
+default-groups = ["dev", "tools"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/trader"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+extend-exclude = ["legacy", "market_data", "download_gui.py", "*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "DTZ"]
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.12"
+typeCheckingMode = "standard"
+
+# 分层规则（DESIGN.md 第 3.3 节），用 `lint-imports` 检查
+[tool.importlinter]
+root_package = "trader"
+
+[[tool.importlinter.contracts]]
+name = "core 不依赖任何其他子包"
+type = "forbidden"
+source_modules = ["trader.core"]
+forbidden_modules = [
+    "trader.data", "trader.indicators", "trader.strategy", "trader.oms", "trader.brokers",
+    "trader.backtest", "trader.research", "trader.api", "trader.apps",
+]
+
+[[tool.importlinter.contracts]]
+name = "indicators 只依赖 core"
+type = "forbidden"
+source_modules = ["trader.indicators"]
+forbidden_modules = [
+    "trader.data", "trader.strategy", "trader.oms", "trader.brokers",
+    "trader.backtest", "trader.research", "trader.api", "trader.apps",
+]
+
+[[tool.importlinter.contracts]]
+name = "strategy 只依赖 core 和 indicators"
+type = "forbidden"
+source_modules = ["trader.strategy"]
+forbidden_modules = [
+    "trader.data", "trader.oms", "trader.brokers",
+    "trader.backtest", "trader.research", "trader.api", "trader.apps",
+]
+
+[[tool.importlinter.contracts]]
+name = "oms 只依赖 core"
+type = "forbidden"
+source_modules = ["trader.oms"]
+forbidden_modules = [
+    "trader.data", "trader.indicators", "trader.strategy", "trader.brokers",
+    "trader.backtest", "trader.research", "trader.api", "trader.apps",
+]
+
+[[tool.importlinter.contracts]]
+name = "研究侧不能导入 IBKR"
+type = "forbidden"
+source_modules = ["trader.backtest", "trader.research", "trader.apps.research_app"]
+forbidden_modules = ["trader.brokers.ibkr"]
+
+[[tool.importlinter.contracts]]
+name = "实盘版入口不导入研究接口"
+type = "forbidden"
+source_modules = ["trader.apps.live_app"]
+forbidden_modules = ["trader.research"]

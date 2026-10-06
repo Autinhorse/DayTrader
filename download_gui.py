@@ -55,8 +55,9 @@ class Worker(QThread):
         self.requests_ = requests_
 
     def run(self):
-        for req in self.requests_:
-            self.log.emit(f"下载 {req.ticker} {req.span_name} {req.start} ~ {req.end} ...")
+        n = len(self.requests_)
+        for i, req in enumerate(self.requests_, 1):
+            self.log.emit(f"[{i}/{n}] 下载 {req.ticker} {req.span_name} {req.start} ~ {req.end} ...")
             try:
                 download(self.client, req, DATA_DIR, log=self.log.emit,
                          progress=self.progress.emit)
@@ -153,7 +154,8 @@ class MainWindow(QWidget):
 
     def start_download(self):
         key = self.api_key.text().strip()
-        tickers = [t.upper() for t in re.split(r"[,\s，]+", self.tickers.text()) if t]
+        # 去重并保持输入顺序
+        tickers = list(dict.fromkeys(t.upper() for t in re.split(r"[,\s，]+", self.tickers.text()) if t))
         start = self.start.date().toPython()
         end = self.end.date().toPython()
         multiplier, timespan = BAR_SIZES[self.bar_size.currentText()]

@@ -12,8 +12,16 @@ check.bat               :: 全部质量检查：ruff、ruff format、pyright、p
 uv run pytest           :: 只跑测试
 uv run ruff format .    :: 格式化
 uv run lint-imports     :: 只查分层规则
-run_downloader.bat      :: 旧的 Massive 下载 GUI（阶段 1 并入 trader.data）
+run_downloader.bat      :: 数据管理 GUI（下载/更新 Massive 1 秒 bar），调用 trader.data.download
+uv run trader data update            :: 清单内标的更新到最新交易日
+uv run trader data report            :: 数据覆盖与校验报告
+uv run trader data bars --symbol SPY --date 2026-10-01
+uv run python tools/ib_record.py     :: IBKR 只读行情录制（只连模拟端口 4002）
+uv run trader data compare --symbol SPY --date <录制日期>
 ```
+
+数据：`data/bars/1s/symbol=X/date=Y.parquet`（原始价格）、`data/catalog.sqlite`、`data/corporate_actions.parquet`、
+`data/live/<日期>/`（IBKR 录制）。Massive key 在 `.env` 的 `MASSIVE_API_KEY`（旧的 `config.json` 也认）。
 
 ## 设计原则（DESIGN.md 1.3）
 

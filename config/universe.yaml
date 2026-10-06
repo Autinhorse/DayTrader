@@ -1,0 +1,29 @@
+# 固定的研究与交易标的清单（DESIGN.md 12.2）。研究版和实盘版共用。
+# 每项可以只写代码，也可以写成 {symbol: ..., half_spread: ..., feed: tick|snapshot, shortable: ...}
+# 注意：清单是人工挑选的，回测结果带有选择偏差。
+symbols:
+  # 指数与行业 ETF
+  - SPY
+  - QQQ
+  - DIA
+  - IWM
+  - XLF
+  - XLE
+  - SMH
+  - TLT
+  - GLD
+  # 个股
+  - AAPL
+  - MSFT
+  - NVDA
+  - TSLA
+  - AMD
+  - AMZN
+  - META
+  - GOOG
+  - SNDK
+  # 杠杆 ETF
+  - NVDL
+  - TSLL
+  - METU
+  - KORU

@@ -1,9 +1,10 @@
 .venv/
 __pycache__/
 config.json
-data/
-runs/
+/data/
+/runs/
 .env
 .pytest_cache/
 .ruff_cache/
 *.egg-info/
+*.png

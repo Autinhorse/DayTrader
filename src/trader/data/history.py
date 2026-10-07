@@ -1,6 +1,7 @@
 """历史查询服务（DESIGN.md 5.6）：任意标的、任意周期、任意时间范围的 bar。
 
-1 秒 bar 直接读存储；其他周期由 trader.data.aggregate 按天聚合，并按
+1 秒 bar 直接读存储；其他周期由 trader.data.aggregate 按天聚合（1 分钟及以上周期的成交量来自
+Massive 官方 1 分钟 bar，没下载官方数据的日子退回用 1 秒 bar 加总），并按
 (周期, 时段, 标的, 交易日期) 缓存到 data/cache/bars/。缓存文件名带源数据指纹，
 源数据重新下载后指纹变化，旧缓存自动失效。
 
@@ -35,6 +36,7 @@ class HistoryService:
     ) -> None:
         self.data_dir = Path(data_dir)
         self.store = BarStore(data_dir)
+        self.minute_store = BarStore(data_dir, "1m")
         self.cal = cal
         self.catalog = catalog
         self.use_cache = use_cache
@@ -82,10 +84,12 @@ class HistoryService:
         fp = self.catalog.fingerprint(symbol, day.day)
         if fp is None:  # 没下载，或这天确认没有数据
             return empty_frame()
-        path = self._cache_path(symbol, timeframe, day.day, session, fp)
+        fp_1m = self.catalog.fingerprint(symbol, day.day, kind="bar_1m") or "none"
+        path = self._cache_path(symbol, timeframe, day.day, session, f"{fp[:12]}{fp_1m[:8]}")
         if self.use_cache and path.exists():
             return pl.read_parquet(path)
-        out = aggregate_day(self.store.read_day(symbol, day.day), day, timeframe, session)
+        official = self.minute_store.read_day(symbol, day.day) if fp_1m != "none" else None
+        out = aggregate_day(self.store.read_day(symbol, day.day), day, timeframe, session, official)
         if self.use_cache:
             for old in path.parent.glob(f"date={day.day.isoformat()}.*.parquet"):
                 old.unlink(missing_ok=True)
@@ -103,7 +107,7 @@ class HistoryService:
             / timeframe
             / session
             / f"symbol={symbol}"
-            / f"date={day.isoformat()}.{fp[:16]}.parquet"
+            / f"date={day.isoformat()}.{fp}.parquet"
         )
 
     def coverage(self, symbol: str) -> list[date]:

@@ -49,9 +49,42 @@ def _agg() -> list[pl.Expr]:
 
 
 def aggregate_day(
-    bars_1s: pl.DataFrame, day: TradingDay, timeframe: str, sessions: SessionFilter
+    bars_1s: pl.DataFrame,
+    day: TradingDay,
+    timeframe: str,
+    sessions: SessionFilter,
+    official_1m: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     check_timeframe(timeframe)
+    out = _aggregate(bars_1s, day, timeframe, sessions)
+    if official_1m is None or official_1m.is_empty() or timeframe_ns(timeframe) < 60 * 10**9:
+        return out
+    vol = _aggregate(official_1m, day, timeframe, sessions).select(
+        "ts_start",
+        pl.col("volume").alias("volume_o"),
+        pl.col("vwap").alias("vwap_o"),
+        pl.col("trades").alias("trades_o"),
+    )
+    return (
+        out.join(vol, on="ts_start", how="left")
+        .with_columns(
+            pl.coalesce("volume_o", "volume").alias("volume"),
+            pl.when(pl.col("volume_o").is_not_null())
+            .then(pl.col("vwap_o"))
+            .otherwise(pl.col("vwap"))
+            .alias("vwap"),
+            pl.when(pl.col("volume_o").is_not_null())
+            .then(pl.col("trades_o"))
+            .otherwise(pl.col("trades"))
+            .alias("trades"),
+        )
+        .select(list(OUT_SCHEMA))
+    )
+
+
+def _aggregate(
+    bars_1s: pl.DataFrame, day: TradingDay, timeframe: str, sessions: SessionFilter
+) -> pl.DataFrame:
     ts = pl.col("ts_start")
     parts: list[pl.DataFrame] = []
     if timeframe == "1d":

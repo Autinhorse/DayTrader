@@ -88,7 +88,7 @@ class Worker(QThread):
     def run(self):
         cal = TradingCalendar()
         catalog = Catalog(data_dir() / "catalog.sqlite")
-        store = BarStore(data_dir())
+        stores = {k: BarStore(data_dir(), k) for k in ("1s", "1m")}
         clock = WallClock(lambda _e: None)
         problems = 0
         try:
@@ -97,12 +97,15 @@ class Worker(QThread):
                     break
                 self.log.emit(f"[{i}/{len(self.jobs)}] {sym} {start} ~ {end}")
                 try:
-                    res = download_symbol(
-                        self.client, store, catalog, cal, clock, sym, start, end,
-                        log=self.log.emit, progress=self.progress.emit,
-                    )
-                    problems += len(res.failed) + len(res.rejected)
-                    if (res.stored or res.empty) and not self.stop_event.is_set():
+                    changed = False
+                    for kind in ("1s", "1m"):  # 1 秒 bar 和官方 1 分钟 bar
+                        res = download_symbol(
+                            self.client, stores[kind], catalog, cal, clock, sym, start, end,
+                            log=self.log.emit, progress=self.progress.emit, kind=kind,
+                        )
+                        problems += len(res.failed) + len(res.rejected)
+                        changed = changed or bool(res.stored or res.empty)
+                    if changed and not self.stop_event.is_set():
                         n = refresh_corporate_actions(self.client, data_dir(), sym)
                         self.log.emit(f"{sym}: 拆股/分红记录 {n} 条")
                 except Exception as e:  # 显示出来，不让线程悄悄退出
@@ -210,8 +213,9 @@ class MainWindow(QWidget):
         self.bar = QProgressBar()
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
-        note = QLabel("只下载 1 秒 bar、原始价格（不复权），含盘前盘后；其他周期由系统聚合生成。"
-                      "当天要等盘后结束 30 分钟后才会下载。")
+        note = QLabel("下载 1 秒 bar 和官方 1 分钟 bar（成交量用），原始价格（不复权），含盘前盘后；"
+                      "其他周期由系统聚合生成。当天要等盘后结束 30 分钟后才会下载，"
+                      "8 小时内下载的算临时数据，下次更新时自动重新下载。")
         note.setStyleSheet("color: gray")
         note.setWordWrap(True)
 

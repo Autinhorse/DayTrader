@@ -101,16 +101,16 @@ class MassiveClient:
             p = None  # next_url 已带全部查询参数
         return rows
 
-    def bars_1s(self, symbol: str, day: date) -> pl.DataFrame:
-        """某个纽约日期的全部 1 秒 bar（含盘前盘后），未复权，按 ts_start 升序。"""
-        d = day.isoformat()
+    def _aggs(self, symbol: str, timespan: str, start: date, end: date) -> pl.DataFrame:
+        """[start, end] 两端日期内的聚合 bar（纽约日期，含盘前盘后），未复权，按 ts_start 升序。"""
         rows = self._paged(
-            f"{self.base_url}/v2/aggs/ticker/{symbol}/range/1/second/{d}/{d}",
+            f"{self.base_url}/v2/aggs/ticker/{symbol}/range/1/{timespan}/"
+            f"{start.isoformat()}/{end.isoformat()}",
             {"adjusted": "false", "sort": "asc", "limit": 50000},
         )
         if not rows:
             return empty_bars()
-        df = pl.DataFrame(
+        return pl.DataFrame(
             {
                 "ts_start": [r["t"] * NS_PER_MS for r in rows],
                 "open": [r["o"] for r in rows],
@@ -123,7 +123,14 @@ class MassiveClient:
             },
             schema=BAR_SCHEMA,
         )
-        return df
+
+    def bars_1s(self, symbol: str, day: date) -> pl.DataFrame:
+        """某个纽约日期的全部 1 秒 bar。"""
+        return self._aggs(symbol, "second", day, day)
+
+    def bars_1m(self, symbol: str, start: date, end: date) -> pl.DataFrame:
+        """[start, end] 内的官方 1 分钟 bar。一次最多 5 万根，约 50 个交易日。"""
+        return self._aggs(symbol, "minute", start, end)
 
     def splits(self, symbol: str) -> list[dict[str, Any]]:
         return self._paged(

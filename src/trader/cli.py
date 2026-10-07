@@ -58,7 +58,7 @@ def cmd_download(args: argparse.Namespace, *, update: bool = False) -> int:
     catalog = _catalog()
     client = _client()
     clock = WallClock(lambda _e: None)
-    store = BarStore(data_dir())
+    stores = {k: BarStore(data_dir(), k) for k in ("1s", "1m")}
     end = date.fromisoformat(args.end) if args.end else ny_date(clock.now())
     failed = 0
     try:
@@ -68,20 +68,24 @@ def cmd_download(args: argparse.Namespace, *, update: bool = False) -> int:
                 start = min(known) if known else DEFAULT_START
             else:
                 start = date.fromisoformat(args.start)
-            res = download_symbol(
-                client,
-                store,
-                catalog,
-                cal,
-                clock,
-                sym,
-                start,
-                end,
-                redownload=getattr(args, "redownload", False),
-                workers=args.workers,
-            )
-            failed += len(res.failed) + len(res.rejected)
-            if res.stored or res.empty:
+            changed = False
+            for kind in ("1s", "1m"):  # 1 秒 bar 和官方 1 分钟 bar
+                res = download_symbol(
+                    client,
+                    stores[kind],
+                    catalog,
+                    cal,
+                    clock,
+                    sym,
+                    start,
+                    end,
+                    redownload=getattr(args, "redownload", False),
+                    workers=args.workers,
+                    kind=kind,
+                )
+                failed += len(res.failed) + len(res.rejected)
+                changed = changed or bool(res.stored or res.empty)
+            if changed:
                 n = refresh_corporate_actions(client, data_dir(), sym)
                 print(f"{sym}: 拆股/分红记录 {n} 条")
     except KeyboardInterrupt:

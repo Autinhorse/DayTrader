@@ -282,6 +282,7 @@ class Clock(Protocol):
 ### 5.1 本地存储
 
 - 基础粒度是 1 秒 bar，路径 `data/bars/1s/symbol=AAPL/date=2026-01-23.parquet`，按 `ts_start` 升序。
+- 另存 Massive 官方 1 分钟 bar，路径 `data/bars/1m/...`，只用作 1 分钟及以上周期的成交量、vwap、成交笔数来源（1 秒数据缺少只计成交量的成交，见决策 0003 第 5 条）。
 - 可选 tick 数据，路径 `data/ticks/symbol=AAPL/date=....parquet`。
 - 列：`ts_start`（UTC 纳秒）、`open`、`high`、`low`、`close`、`volume`、`vwap`、`trades`。
 - 存原始未复权价格；另存 `data/corporate_actions.parquet`（拆股、分红），跨日指标按需复权。

@@ -1,4 +1,7 @@
-"""从 Massive 下载 1 秒 bar 到本地存储（研究版专用）。
+"""从 Massive 下载 bar 到本地存储（研究版专用）。
+
+两种数据（见 trader.data.store）：kind="1s" 是 1 秒 bar，每天一个请求；kind="1m" 是官方 1 分钟 bar，
+连续的交易日合并成一个请求（每次最多 MINUTE_CHUNK_DAYS 天），再按交易日拆开存放。
 
 增量：只请求区间内尚未处理过的交易日，所以"往前补一段"、"更新到今天"、"新增标的"
 都是同一个操作——对指定标的下载指定区间。尚未收盘完毕的当天不下载。
@@ -21,12 +24,12 @@ from typing import Protocol
 import polars as pl
 
 from trader.core.clock import Clock
-from trader.core.timeutil import NS_PER_HOUR, NS_PER_MIN, ny_date
+from trader.core.timeutil import NS_PER_HOUR, NS_PER_MIN, NS_PER_SEC, ny_date
 from trader.core.trading_calendar import TradingCalendar
 from trader.data.catalog import Catalog
 from trader.data.corporate_actions import ACTION_SCHEMA, replace_symbol_actions
 from trader.data.massive import Cancelled, MassiveClient
-from trader.data.store import BarStore, fingerprint
+from trader.data.store import BarKind, BarStore, fingerprint
 from trader.data.validate import DEFAULT_GAP_THRESHOLD_S, validate_day
 
 # 盘后结束后至少等这么久才下载当天数据
@@ -35,12 +38,18 @@ SETTLE_NS = 30 * NS_PER_MIN
 FINAL_NS = 8 * NS_PER_HOUR
 
 
+# 官方 1 分钟 bar 每次请求最多覆盖这么多个交易日（每天最多约 960 根，单次上限 5 万根）
+MINUTE_CHUNK_DAYS = 40
+
+
 class BarSource(Protocol):
     """download_symbol 需要的数据源接口；MassiveClient 实现它，测试用假客户端。"""
 
     stop_event: threading.Event
 
     def bars_1s(self, symbol: str, day: date) -> pl.DataFrame: ...
+
+    def bars_1m(self, symbol: str, start: date, end: date) -> pl.DataFrame: ...
 
 
 Log = Callable[[str], None]
@@ -75,16 +84,48 @@ def plan_days(
     end: date,
     now: int,
     redownload: bool = False,
+    kind: BarKind = "1s",
 ) -> list[date]:
     days = complete_days(cal, start, end, now)
     if redownload:
         return days
     final = {
         p.day
-        for p in catalog.partitions(symbol)
+        for p in catalog.partitions(symbol, catalog_kind(kind))
         if p.imported_at >= cal.trading_day(p.day).end + FINAL_NS
     }
     return [d for d in days if d not in final]
+
+
+def catalog_kind(kind: BarKind) -> str:
+    return f"bar_{kind}"
+
+
+def _chunks(cal: TradingCalendar, days: list[date], kind: BarKind) -> list[list[date]]:
+    """每个请求覆盖的交易日：1s 每天一个；1m 把连续的交易日合并。"""
+    if kind == "1s":
+        return [[d] for d in days]
+    out: list[list[date]] = []
+    for d in days:
+        last = out[-1] if out else None
+        if last and len(last) < MINUTE_CHUNK_DAYS and cal.next_trading_day(last[-1]) == d:
+            last.append(d)
+        else:
+            out.append([d])
+    return out
+
+
+def _fetch(
+    client: BarSource, cal: TradingCalendar, symbol: str, kind: BarKind, days: list[date]
+) -> dict[date, pl.DataFrame]:
+    if kind == "1s":
+        return {days[0]: client.bars_1s(symbol, days[0])}
+    df = client.bars_1m(symbol, days[0], days[-1])
+    out = {}
+    for d in days:
+        td = cal.trading_day(d)
+        out[d] = df.filter((pl.col("ts_start") >= td.start) & (pl.col("ts_start") < td.end))
+    return out
 
 
 def download_symbol(
@@ -102,32 +143,43 @@ def download_symbol(
     gap_threshold_s: int = DEFAULT_GAP_THRESHOLD_S,
     log: Log = print,
     progress: Progress | None = None,
+    kind: BarKind = "1s",
 ) -> SymbolResult:
+    """下载一个标的一种数据。store 必须是同一种 kind 的 BarStore。"""
+    if store.kind != kind:
+        raise ValueError(f"store 是 {store.kind}，与 kind={kind} 不符")
     symbol = symbol.upper()
-    days = plan_days(catalog, cal, symbol, start, end, clock.now(), redownload)
+    label = "1 秒 bar" if kind == "1s" else "官方 1 分钟 bar"
+    days = plan_days(catalog, cal, symbol, start, end, clock.now(), redownload, kind)
     res = SymbolResult(symbol, planned=len(days))
     if not days:
-        log(f"{symbol}: {start} ~ {end} 没有需要下载的交易日")
+        log(f"{symbol} {label}: {start} ~ {end} 没有需要下载的交易日")
         return res
-    log(f"{symbol}: 需要下载 {len(days)} 个交易日（{days[0]} ~ {days[-1]}）")
+    log(f"{symbol} {label}: 需要下载 {len(days)} 个交易日（{days[0]} ~ {days[-1]}）")
 
     done = 0
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(client.bars_1s, symbol, d): d for d in days}
+        futures = {
+            pool.submit(_fetch, client, cal, symbol, kind, chunk): chunk
+            for chunk in _chunks(cal, days, kind)
+        }
         try:
             for fut in as_completed(futures):
-                day = futures[fut]
+                chunk = futures[fut]
                 try:
-                    df: pl.DataFrame = fut.result()
+                    frames: dict[date, pl.DataFrame] = fut.result()
                 except Cancelled:
                     res.cancelled = True
                     continue
-                except Exception as e:  # 单日失败不影响其他日期，下次重试
-                    res.failed.append((day, str(e)))
-                    log(f"  {symbol} {day} 下载失败：{e}")
+                except Exception as e:  # 失败的日期不影响其他日期，下次重试
+                    res.failed += [(d, str(e)) for d in chunk]
+                    log(f"  {symbol} {chunk[0]}~{chunk[-1]} 下载失败：{e}")
                     continue
-                _store_day(store, catalog, cal, clock, symbol, day, df, gap_threshold_s, res, log)
-                done += 1
+                for day, df in frames.items():
+                    _store_day(
+                        store, catalog, cal, clock, symbol, day, df, gap_threshold_s, res, log
+                    )
+                done += len(chunk)
                 if progress:
                     progress(symbol, done, len(days))
         finally:
@@ -137,7 +189,7 @@ def download_symbol(
                     f.cancel()
 
     log(
-        f"{symbol}: 写入 {res.stored} 天（{res.rows:,} 根），无数据 {res.empty} 天，"
+        f"{symbol} {label}: 写入 {res.stored} 天（{res.rows:,} 根），无数据 {res.empty} 天，"
         f"校验拒绝 {len(res.rejected)} 天，失败 {len(res.failed)} 天"
         + ("，已停止" if res.cancelled else "")
     )
@@ -156,18 +208,20 @@ def _store_day(
     res: SymbolResult,
     log: Log,
 ) -> None:
-    check = validate_day(df, cal.trading_day(day), gap_threshold_s)
+    kind = store.kind
+    bar_ns = NS_PER_SEC if kind == "1s" else NS_PER_MIN
+    check = validate_day(df, cal.trading_day(day), gap_threshold_s, bar_ns)
     if not check.ok:
         res.rejected.append((day, str(check.errors)))
         log(f"  {symbol} {day} 校验未通过，未写入：{check.errors}")
         return
     if df.is_empty():
         store.delete_day(symbol, day)
-        catalog.record(symbol, day, check, None, clock.now())
+        catalog.record(symbol, day, check, None, clock.now(), kind=catalog_kind(kind))
         res.empty += 1
         return
     store.write_day(symbol, day, df)
-    catalog.record(symbol, day, check, fingerprint(df), clock.now())
+    catalog.record(symbol, day, check, fingerprint(df), clock.now(), kind=catalog_kind(kind))
     res.stored += 1
     res.rows += df.height
 

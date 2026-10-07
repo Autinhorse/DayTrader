@@ -33,8 +33,12 @@ def _count(df: pl.DataFrame, expr: pl.Expr) -> int:
 
 
 def validate_day(
-    df: pl.DataFrame, day: TradingDay, gap_threshold_s: int = DEFAULT_GAP_THRESHOLD_S
+    df: pl.DataFrame,
+    day: TradingDay,
+    gap_threshold_s: int = DEFAULT_GAP_THRESHOLD_S,
+    bar_ns: int = NS_PER_SEC,
 ) -> DayCheck:
+    """bar_ns：bar 的周期（1 秒 bar 或官方 1 分钟 bar），用于判断空档。"""
     check = DayCheck(rows=df.height)
     if df.is_empty():
         return check
@@ -69,9 +73,9 @@ def validate_day(
     # 常规时段内的长空档：包括开盘到第一根、最后一根到收盘
     rth = df.filter((ts >= day.open) & (ts < day.close))["ts_start"].to_list()
     threshold = gap_threshold_s * NS_PER_SEC
-    edges = [day.open - NS_PER_SEC, *rth, day.close]
+    edges = [day.open - bar_ns, *rth, day.close]
     for prev, cur in zip(edges, edges[1:], strict=False):
-        start = prev + NS_PER_SEC  # 上一根 bar 结束的时刻
+        start = prev + bar_ns  # 上一根 bar 结束的时刻
         if cur - start >= threshold:
             check.gaps.append((start, cur))
     put(check.warnings, "rth_gaps", len(check.gaps))

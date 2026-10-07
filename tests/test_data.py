@@ -124,6 +124,11 @@ class FakeClient:
             raise MassiveError("HTTP 500")
         return self.data.get((symbol, day), pl.DataFrame(schema=BAR_SCHEMA))
 
+    def bars_1m(self, symbol: str, start: date, end: date) -> pl.DataFrame:
+        self.calls.append((symbol, start))
+        frames = [df for (s, d), df in self.data.items() if s == symbol and start <= d <= end]
+        return pl.concat(frames) if frames else pl.DataFrame(schema=BAR_SCHEMA)
+
 
 def env(tmp_path, now: int):
     clock = SimClock(EventScheduler(), start=now)
@@ -290,3 +295,67 @@ def test_provisional_days_are_redownloaded(tmp_path):
     client.calls.clear()
     download_symbol(client, store, catalog, CAL, clock, "SPY", DAY, DAY, log=lambda _m: None)
     assert client.calls == []
+
+
+# ---------- 官方 1 分钟 bar ----------
+
+
+def minute_bars(day: date, volume: float) -> pl.DataFrame:
+    td = CAL.trading_day(day)
+    ts = [td.open + i * 60 * NS_PER_SEC for i in range(390)]
+    n = len(ts)
+    return pl.DataFrame(
+        {
+            "ts_start": ts,
+            "open": [100.0] * n,
+            "high": [101.0] * n,
+            "low": [99.0] * n,
+            "close": [100.0] * n,
+            "volume": [volume] * n,
+            "vwap": [100.5] * n,
+            "trades": [7] * n,
+        },
+        schema=BAR_SCHEMA,
+    )
+
+
+def test_minute_download_chunks_consecutive_days(tmp_path):
+    days = [date(2026, 1, 5), date(2026, 1, 6), date(2026, 1, 7), date(2026, 1, 8)]
+    client = FakeClient({("SPY", d): minute_bars(d, 1000.0) for d in days})
+    store = BarStore(tmp_path, "1m")
+    catalog = Catalog(tmp_path / "catalog.sqlite")
+    clock = SimClock(EventScheduler(), start=ny_to_ns(date(2026, 1, 12), time(12)))
+    res = download_symbol(
+        client, store, catalog, CAL, clock, "SPY", days[0], days[-1], kind="1m", log=lambda _m: None
+    )
+    assert client.calls == [("SPY", days[0])]  # 4 个连续交易日合并成一个请求
+    assert res.stored == 4
+    assert store.read_day("SPY", days[1]).height == 390  # 按交易日拆开
+    assert catalog.known_days("SPY", "bar_1m") == set(days)
+    assert catalog.known_days("SPY") == set()  # 不影响 1 秒 bar 的登记
+    with pytest.raises(ValueError):
+        download_symbol(client, BarStore(tmp_path), catalog, CAL, clock, "SPY", DAY, DAY, kind="1m")
+
+
+def test_history_uses_official_minute_volume(history):
+    """1 分钟及以上周期：价格来自 1 秒 bar，成交量、vwap、笔数来自官方 1 分钟 bar。
+
+    1 秒周期不受影响。
+    """
+    d = date(2026, 1, 5)
+    off = minute_bars(d, 1000.0)
+    BarStore(history.data_dir, "1m").write_day("AAA", d, off)
+    history.catalog.record(
+        "AAA", d, validate_day(off, CAL.trading_day(d)), fingerprint(off), 0, kind="bar_1m"
+    )
+    td = CAL.trading_day(d)
+    m5 = history.bars("AAA", "5m", td.open, td.close)
+    assert m5["volume"].unique().to_list() == [5000.0]
+    assert m5["trades"].unique().to_list() == [35]
+    assert m5["vwap"].unique().to_list() == [pytest.approx(100.5)]
+    assert m5["close"].unique().to_list() == [100.0]  # 价格仍来自 1 秒 bar
+    s1 = history.bars("AAA", "1s", td.open, td.close)
+    assert s1["volume"].unique().to_list() == [100.0]
+    # 没有官方数据的日子退回用 1 秒 bar 加总
+    d2 = CAL.trading_day(date(2026, 1, 6))
+    assert history.bars("AAA", "5m", d2.open, d2.close)["volume"].unique().to_list() == [1000.0]

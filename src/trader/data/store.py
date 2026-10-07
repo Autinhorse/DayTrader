@@ -1,6 +1,9 @@
-"""1 秒 bar 的本地存储（DESIGN.md 5.1）。
+"""bar 的本地存储（DESIGN.md 5.1）。
 
-路径 data/bars/1s/symbol=AAPL/date=2026-01-23.parquet，每个标的每天一个文件，按 ts_start 升序。
+两套数据，结构相同，每个标的每天一个文件，按 ts_start 升序：
+    data/bars/1s/symbol=AAPL/date=2026-01-23.parquet   Massive 1 秒 bar（价格的来源）
+    data/bars/1m/symbol=AAPL/date=2026-01-23.parquet   Massive 官方 1 分钟 bar
+        （1 分钟及以上周期成交量的来源，见 docs/decisions/0003 第 5 条）
 存原始未复权价格。写入先落临时文件再原子替换，中途失败不留半成品。
 """
 
@@ -10,6 +13,7 @@ import hashlib
 import os
 from datetime import date
 from pathlib import Path
+from typing import Literal
 
 import polars as pl
 
@@ -38,9 +42,13 @@ def fingerprint(df: pl.DataFrame) -> str:
     return h.hexdigest()
 
 
+BarKind = Literal["1s", "1m"]
+
+
 class BarStore:
-    def __init__(self, data_dir: Path) -> None:
-        self.root = Path(data_dir) / "bars" / "1s"
+    def __init__(self, data_dir: Path, kind: BarKind = "1s") -> None:
+        self.kind: BarKind = kind
+        self.root = Path(data_dir) / "bars" / kind
 
     def path(self, symbol: str, day: date) -> Path:
         return self.root / f"symbol={symbol}" / f"date={day.isoformat()}.parquet"

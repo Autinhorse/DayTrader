@@ -30,7 +30,6 @@ from trader.data.validate import DEFAULT_GAP_THRESHOLD_S, validate_day
 SETTLE_NS = 30 * NS_PER_MIN
 
 
-
 class BarSource(Protocol):
     """download_symbol 需要的数据源接口；MassiveClient 实现它，测试用假客户端。"""
 
@@ -55,9 +54,7 @@ class SymbolResult:
     cancelled: bool = False
 
 
-def complete_days(
-    cal: TradingCalendar, start: date, end: date, now: int
-) -> list[date]:
+def complete_days(cal: TradingCalendar, start: date, end: date, now: int) -> list[date]:
     """[start, end] 内已经完整结束的交易日。"""
     end = min(end, ny_date(now))
     if end < start:

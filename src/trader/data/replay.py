@@ -66,7 +66,9 @@ class HistoricalBarFeed:
                 seq += 1
                 yield BarEvent(bar, meta)
 
-    def _day_stream(self, rank: int, symbol: str, lo: int, hi: int) -> Iterator[tuple[int, int, Bar]]:
+    def _day_stream(
+        self, rank: int, symbol: str, lo: int, hi: int
+    ) -> Iterator[tuple[int, int, Bar]]:
         df = self._history.bars(symbol, "1s", lo, hi, session=self._session)
         for ts, o, h, low, c, v, vw, n in df.iter_rows():
             # 1 秒 bar 的 ts_end = ts_start + 1s，排序键用它代替可用时间（延迟对所有 bar 相同）

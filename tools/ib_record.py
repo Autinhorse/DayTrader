@@ -8,7 +8,7 @@
 
 用法（交易日盘前启动，默认录到 20:00 盘后结束，Ctrl+C 可提前结束）：
     uv run python tools/ib_record.py
-    uv run python tools/ib_record.py --tick-symbols SPY,QQQ,NVDA --until 16:05
+    uv run python tools/ib_record.py --tick-symbols SPY,QQQ,NVDA,TSLA,AAPL --until 16:05
 """
 
 from __future__ import annotations
@@ -57,32 +57,43 @@ class Recorder:
         out_dir.mkdir(parents=True, exist_ok=True)
         self.tbt = (out_dir / "tbt.jsonl").open("a", encoding="utf-8")
         self.mkt = (out_dir / "mkt.jsonl").open("a", encoding="utf-8")
-        self.symbol_of: dict[int, str] = {}
-        self.tbt_seen: dict[int, int] = {}
+        self.symbol_of: dict[int, str] = {}  # id(Ticker) -> 代码
+        self.tbt_tickers: set[int] = set()  # 订阅了逐笔的 Ticker
         self.counts = {"tbt": 0, "mkt": 0}
 
-    def on_pending(self, tickers: set[Ticker]) -> None:
-        recv = time.time_ns()
-        for t in tickers:
-            sym = self.symbol_of.get(id(t))
-            if sym is None:
-                continue
-            # 逐笔成交：tickByTicks 只含本批新到的记录
-            for tb in t.tickByTicks:
+    def hook_tick_by_tick(self, ib: IB) -> None:
+        """ib_async 会把逐笔成交的 IB 原始成交时间（秒）换成本机接收时间，
+        所以在它处理之前截获原始回调，自己记录。"""
+        wrapper = ib.wrapper
+        original = wrapper.tickByTickAllLast
+
+        def hooked(reqId, tickType, ib_time, price, size, attrib, exchange, conditions):
+            ticker = wrapper.reqId2Ticker.get(reqId)
+            sym = self.symbol_of.get(id(ticker)) if ticker is not None else None
+            if sym is not None:
                 rec = {
                     "sym": sym,
-                    "recv": recv,
-                    "ts": ns(tb.time),
-                    "price": tb.price,
-                    "size": float(tb.size),
-                    "exch": tb.exchange,
-                    "cond": tb.specialConditions,
-                    "past_limit": bool(getattr(tb.tickAttribLast, "pastLimit", False)),
-                    "unreported": bool(getattr(tb.tickAttribLast, "unreported", False)),
+                    "recv": time.time_ns(),
+                    "ts": int(ib_time) * 1_000_000_000,  # IB 原始成交时间，只精确到秒
+                    "price": price,
+                    "size": float(size),
+                    "exch": exchange,
+                    "cond": conditions,
+                    "past_limit": bool(getattr(attrib, "pastLimit", False)),
+                    "unreported": bool(getattr(attrib, "unreported", False)),
                 }
                 self.tbt.write(json.dumps(rec) + "\n")
                 self.counts["tbt"] += 1
-            if t.tickByTicks:
+            original(reqId, tickType, ib_time, price, size, attrib, exchange, conditions)
+
+        wrapper.tickByTickAllLast = hooked
+
+    def on_pending(self, tickers: set[Ticker]) -> None:
+        """普通流式行情：每次更新记一条快照。逐笔成交在 hook_tick_by_tick 里记录。"""
+        recv = time.time_ns()
+        for t in tickers:
+            sym = self.symbol_of.get(id(t))
+            if sym is None or id(t) in self.tbt_tickers:
                 continue
             rec = {
                 "sym": sym,
@@ -133,6 +144,7 @@ async def main_async(args: argparse.Namespace) -> int:
     ib.reqMarketDataType(1)  # 实时行情
 
     rec = Recorder(out_dir)
+    rec.hook_tick_by_tick(ib)
     contracts = [Stock(s, "SMART", "USD") for s in symbols]
     qualified = await ib.qualifyContractsAsync(*contracts)
     by_sym = {c.symbol: c for c in qualified if c and c.conId}
@@ -142,7 +154,11 @@ async def main_async(args: argparse.Namespace) -> int:
 
     for s, c in by_sym.items():
         # 233 = RTVolume：最新成交价、量、时间
-        t = ib.reqTickByTickData(c, "AllLast") if s in tick_syms else ib.reqMktData(c, "233")
+        if s in tick_syms:
+            t = ib.reqTickByTickData(c, "AllLast")
+            rec.tbt_tickers.add(id(t))
+        else:
+            t = ib.reqMktData(c, "233")
         rec.symbol_of[id(t)] = s
     ib.pendingTickersEvent += rec.on_pending
 
@@ -173,8 +189,8 @@ def main() -> int:
     p.add_argument("--symbols", help="默认 universe.yaml 全部")
     p.add_argument(
         "--tick-symbols",
-        default="SPY,QQQ,NVDA",
-        help="订阅逐笔成交的标的（并发额度很少，超出时 IB 会报错 10190）",
+        default="SPY,QQQ,NVDA,TSLA,AAPL",
+        help="订阅逐笔成交的标的（账户并发额度为 5 个，超出时 IB 报错 10190）",
     )
     p.add_argument("--until", default="20:00", help="纽约时间 HH:MM")
     args = p.parse_args()

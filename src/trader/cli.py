@@ -5,7 +5,7 @@
     trader data actions [--symbols ...]         刷新拆股与分红表
     trader data report [--symbols ...]          覆盖范围与校验报告
     trader data bars --symbol SPY --date 2026-10-01 [--session extended] [--adjusted]
-    trader data compare --symbol SPY --date 2026-10-08   与 IBKR 录制数据对比
+    trader data compare --date 2026-10-06 [--symbols SPY,QQQ]   与 IBKR 录制数据对比
 
 不带 --symbols 时使用 config/universe.yaml 里的全部标的。
 """
@@ -213,7 +213,8 @@ def cmd_bars(args: argparse.Namespace) -> int:
 def cmd_compare(args: argparse.Namespace) -> int:
     from trader.data.compare import compare_day
 
-    return compare_day(args.symbol.upper(), date.fromisoformat(args.date), data_dir())
+    syms = _symbols(args.symbols) if args.symbols else None
+    return compare_day(date.fromisoformat(args.date), data_dir(), syms)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -253,7 +254,7 @@ def build_parser() -> argparse.ArgumentParser:
     b.set_defaults(func=cmd_bars)
 
     c = data.add_parser("compare", help="与 IBKR 录制数据对比")
-    c.add_argument("--symbol", required=True)
+    c.add_argument("--symbols", help="默认录制到的全部标的")
     c.add_argument("--date", required=True)
     c.set_defaults(func=cmd_compare)
     return p

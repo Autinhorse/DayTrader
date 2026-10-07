@@ -48,15 +48,25 @@ def validate_day(
     put(check.errors, "duplicate_ts", _count(df, diffs == 0))
     put(check.errors, "unsorted", _count(df, diffs < 0))
     price_cols = [pl.col(c) for c in ("open", "high", "low", "close")]
-    put(check.errors, "nonpositive_price", _count(df, pl.any_horizontal([c <= 0 for c in price_cols])))
+    put(
+        check.errors,
+        "nonpositive_price",
+        _count(df, pl.any_horizontal([c <= 0 for c in price_cols])),
+    )
     put(check.errors, "negative_volume", _count(df, pl.col("volume") < 0))
 
     hi, lo = pl.col("high"), pl.col("low")
     bad_ohlc = (hi < pl.max_horizontal("open", "close")) | (lo > pl.min_horizontal("open", "close"))
     put(check.warnings, "ohlc_inconsistent", _count(df, bad_ohlc | (hi < lo)))
     # vwap 计入了不更新 OHLC 的成交类型，可能落在当秒最高最低价之外
-    put(check.warnings, "vwap_outside_range", _count(df, (pl.col("vwap") > hi) | (pl.col("vwap") < lo)))
-    put(check.warnings, "outside_sessions", _count(df, (ts < day.pre_open) | (ts >= day.post_close)))
+    put(
+        check.warnings,
+        "vwap_outside_range",
+        _count(df, (pl.col("vwap") > hi) | (pl.col("vwap") < lo)),
+    )
+    put(
+        check.warnings, "outside_sessions", _count(df, (ts < day.pre_open) | (ts >= day.post_close))
+    )
 
     # 常规时段内的长空档：包括开盘到第一根、最后一根到收盘
     rth = df.filter((ts >= day.open) & (ts < day.close))["ts_start"].to_list()

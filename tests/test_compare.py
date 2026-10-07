@@ -73,9 +73,12 @@ def test_compare_day_end_to_end(tmp_path):
     live.mkdir(parents=True)
     with (live / "tbt.jsonl").open("w") as f:
         for t in ts[:100]:
-            f.write(json.dumps({"sym": "SPY", "ts": t, "price": 10.0, "size": 5}) + "\n")
+            rec = {"sym": "SPY", "ts": t, "recv": t, "price": 10.0, "size": 5, "unreported": False}
+            f.write(json.dumps(rec) + "\n")
     out = tmp_path / "out"
-    assert compare_day("SPY", DAY, tmp_path, out) == 0
-    text = (out / f"{DAY}_SPY.txt").read_text(encoding="utf-8")
-    assert "共同 100" in text and "完全相同 100.0%" in text
-    assert "1 分钟 bar" in text
+    assert compare_day(DAY, tmp_path, ["SPY"], out) == 0
+    # 录制覆盖 10:00:00 ~ 10:01:39，只比较完整分钟 [10:00, 10:01)
+    detail = (out / f"{DAY}_detail.txt").read_text(encoding="utf-8")
+    assert "Massive 60，IBKR 60，共同 60" in detail and "完全相同 100.0%" in detail
+    summary = (out / f"{DAY}_summary.txt").read_text(encoding="utf-8")
+    assert "SPY" in summary and "100.0%" in summary

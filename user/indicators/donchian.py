@@ -22,7 +22,7 @@ from trader.indicators.base import (
 
 
 class DonchianParams(IndicatorParams):
-    period: int = Field(20, ge=1, le=1000, description="回看根数")
+    period: int = Field(default=20, ge=1, le=1000, description="回看根数")
 
 
 @register_indicator

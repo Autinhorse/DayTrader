@@ -203,9 +203,9 @@ _TERMINAL_STATUSES = frozenset(
 
 @dataclass(slots=True)
 class Order:
-    """可变的运行时订单，由归约函数 reduce(order, event) 从事件流算出。
+    """可变的运行时订单，由归约函数 trader.oms.orders.reduce 从事件流算出（DESIGN.md 8.1）。
 
-    归约见 DESIGN.md 8.1，阶段 3 实现。
+    改单时用新的 intent 替换旧的（数量、限价、止损价）。
     """
 
     intent: OrderIntent
@@ -221,6 +221,13 @@ class Order:
     commission: Decimal = Decimal(0)
     commission_pending: bool = False  # 有成交的手续费尚未到达时为 True，净盈亏视为未结算
     status_times: dict[OrderStatus, int] = field(default_factory=dict)  # 各状态首次进入的时间
+    exec_ids: set[str] = field(default_factory=set)  # 已入账的成交，按 broker_exec_id 去重
+    created_at: int = 0
+    parent_id: str | None = None  # 括号单的子单指向入场单
+    oca_group: str | None = None  # 同组的退出单（止盈、止损）互斥
+    role: str = "single"  # single / entry / take_profit / stop_loss
+    reject_rule: str | None = None  # 被风控或执行器拒绝的规则
+    reject_detail: str = ""
 
     @property
     def remaining_qty(self) -> int:

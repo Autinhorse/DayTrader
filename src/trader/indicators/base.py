@@ -76,7 +76,7 @@ _REGISTRY: dict[str, type[Indicator]] = {}
 USER_MODULE_PREFIX = "user_indicators"
 
 
-def register_indicator(cls: type[Indicator]) -> type[Indicator]:
+def register_indicator[I: type[Indicator]](cls: I) -> I:
     """类装饰器。重名时报错；同一个文件重新加载（热加载）时覆盖旧的。"""
     for attr in ("name", "Params", "outputs"):
         if not hasattr(cls, attr):

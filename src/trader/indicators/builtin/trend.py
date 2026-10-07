@@ -22,8 +22,8 @@ CONVERGE = 4
 
 
 class PeriodParams(IndicatorParams):
-    period: int = Field(20, ge=1, le=1000, description="周期（根数）")
-    source: Source = Field("close", description="价格来源")
+    period: int = Field(default=20, ge=1, le=1000, description="周期（根数）")
+    source: Source = Field(default="close", description="价格来源")
 
 
 @register_indicator
@@ -65,8 +65,8 @@ class EMA(Indicator):
 
 
 class BollingerParams(IndicatorParams):
-    period: int = Field(20, ge=2, le=1000)
-    k: float = Field(2.0, gt=0, le=10, description="标准差倍数")
+    period: int = Field(default=20, ge=2, le=1000)
+    k: float = Field(default=2.0, gt=0, le=10, description="标准差倍数")
     source: Source = "close"
 
 
@@ -99,9 +99,9 @@ class Bollinger(Indicator):
 
 
 class MacdParams(IndicatorParams):
-    fast: int = Field(12, ge=1, le=500)
-    slow: int = Field(26, ge=2, le=1000)
-    signal: int = Field(9, ge=1, le=500)
+    fast: int = Field(default=12, ge=1, le=500)
+    slow: int = Field(default=26, ge=2, le=1000)
+    signal: int = Field(default=9, ge=1, le=500)
     source: Source = "close"
 
 
@@ -137,7 +137,7 @@ class MACD(Indicator):
 
 
 class RsiParams(IndicatorParams):
-    period: int = Field(14, ge=1, le=1000)
+    period: int = Field(default=14, ge=1, le=1000)
     source: Source = "close"
 
 
@@ -171,7 +171,7 @@ class RSI(Indicator):
 
 
 class AtrParams(IndicatorParams):
-    period: int = Field(14, ge=1, le=1000)
+    period: int = Field(default=14, ge=1, le=1000)
 
 
 @register_indicator
@@ -199,7 +199,7 @@ class ATR(Indicator):
 
 
 class VolumeMaParams(IndicatorParams):
-    period: int = Field(20, ge=1, le=1000)
+    period: int = Field(default=20, ge=1, le=1000)
 
 
 @register_indicator

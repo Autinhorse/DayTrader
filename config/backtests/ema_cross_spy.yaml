@@ -1,0 +1,13 @@
+# 示例回测：SPY 1 分钟 EMA 交叉，只看常规时段，收盘前平仓
+name: SPY 均线交叉示例
+strategy: ema_cross
+params: {symbol: SPY, timeframe: 1m, fast: 9, slow: 21, notional: 10000, allow_short: false}
+start: 2026-09-01
+end: 2026-09-30
+session: rth
+initial_cash: 100000
+sim:
+  half_spread_bps: {default: 2, SPY: 0.5}
+risk:
+  max_order_usd: 20000
+  max_position_usd: 20000

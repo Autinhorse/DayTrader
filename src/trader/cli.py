@@ -8,6 +8,9 @@
     trader data compare --date 2026-10-06 [--symbols SPY,QQQ]   与 IBKR 录制数据对比
     trader data check-agg --symbols SPY --date 2026-10-05   1 分钟 bar 与 Massive 官方对比
     trader indicators list                      全部指标（内置 + user/indicators/）
+    trader strategies list                      全部策略（user/strategies/）
+    trader backtest run config/backtests/ema_cross_spy.yaml
+    trader backtest list                        最近的回测
     trader indicators compute --symbol SPY --timeframe 5m --name ema --params period=20 --date D
 
 不带 --symbols 时使用 config/universe.yaml 里的全部标的。
@@ -303,6 +306,99 @@ def cmd_ind_compute(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_strategies_list(args: argparse.Namespace) -> int:
+    from trader.strategy.base import list_strategies, load_user_strategies
+
+    errors = load_user_strategies(project_dir() / "user" / "strategies")
+    for cls in list_strategies():
+        params = ", ".join(f"{k}={f.default}" for k, f in cls.Params.model_fields.items())
+        print(f"{cls.name:<16} {cls.description}")
+        print(f"{'':<16} 参数：{params}")
+    for f, e in errors.items():
+        print(f"加载失败 user/strategies/{f}：{e}")
+    return 1 if errors else 0
+
+
+def _fmt(x: object, pct: bool = False) -> str:
+    if x is None:
+        return "-"
+    if isinstance(x, float):
+        return f"{x * 100:.1f}%" if pct else f"{x:,.2f}"
+    return str(x)
+
+
+def cmd_backtest_run(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from trader.backtest.config import load_config
+    from trader.backtest.runner import run_backtest
+
+    cfg = load_config(Path(args.config))
+    if args.start:
+        cfg.start = date.fromisoformat(args.start)
+    if args.end:
+        cfg.end = date.fromisoformat(args.end)
+    print(f"回测 {cfg.name or cfg.strategy}：{cfg.start} ~ {cfg.end} ...")
+    r = run_backtest(
+        cfg, data_dir=data_dir(), project_dir=project_dir(), clock=WallClock(lambda _e: None)
+    )
+    s = r.summary
+    c, pnl, perf, risk = s["counts"], s["pnl"], s["performance"], s["risk"]
+    print(
+        f"交易 {c['trades']} 笔（多 {c['long']} / 空 {c['short']}），订单 {c['orders']}，"
+        f"被拒 {c['rejected']}，部分成交 {c['partially_filled']}"
+    )
+    print(
+        f"净盈亏 {_fmt(pnl['net_pnl'])} = 毛盈亏 {_fmt(pnl['gross_pnl'])} − 手续费 "
+        f"{_fmt(pnl['commission'])}；收益率 {pnl['return_pct']:.2f}%"
+    )
+    print(
+        f"  毛盈亏按含成本的成交价计算，其中价差成本 {_fmt(pnl['spread_cost'])}、"
+        f"冲击成本 {_fmt(pnl['impact_cost'])}"
+    )
+    print(
+        f"胜率 {_fmt(perf['win_rate'], True)}，盈亏比 {_fmt(perf['payoff_ratio'])}，"
+        f"利润因子 {_fmt(perf['profit_factor'])}，期望 {_fmt(perf['expectancy'])} 美元/笔"
+    )
+    print(
+        f"最大回撤 {_fmt(risk['max_drawdown'])}（{_fmt(risk['max_drawdown_pct'], True)}），"
+        f"日夏普 {_fmt(risk['sharpe_daily_annualized'])}，"
+        f"平均持仓 {_fmt(s['holding']['avg_holding_min'])} 分钟"
+    )
+    scen = s["cost_sensitivity"]["scenarios"]
+    print(
+        "成本敏感性（价差与冲击按倍数重算）："
+        + "；".join(f"{x['multiplier']:g} 倍 净盈亏 {_fmt(x['net_pnl'])}" for x in scen)
+    )
+    be = s["cost_sensitivity"]["breakeven_extra_cost_per_share"]
+    print(f"盈亏平衡：每股再多 {_fmt(be)} 美元成本时净盈亏归零")
+    pa, lq = s["path_ambiguity"], s["liquidity"]
+    print(
+        f"路径歧义 {pa['trades']} 笔（若按有利结果多 {_fmt(pa['pnl_if_favorable'])}）；"
+        f"超出市价单模型适用范围 {lq['out_of_range_trades']} 笔"
+    )
+    print(f"结果已保存到 {r.out_dir}")
+    return 0
+
+
+def cmd_backtest_list(args: argparse.Namespace) -> int:
+    import sqlite3
+
+    idx = project_dir() / "runs" / "index.sqlite"
+    if not idx.exists():
+        print("还没有回测记录")
+        return 0
+    with sqlite3.connect(idx) as db:
+        rows = db.execute(
+            "SELECT run_id, name, start, end, trades, net_pnl FROM runs "
+            "ORDER BY created DESC LIMIT ?",
+            (args.limit,),
+        ).fetchall()
+    for run_id, name, start, end, trades, net in rows:
+        print(f"{run_id:<40} {name or '':<20} {start}~{end} 交易 {trades:>4} 净盈亏 {net:>10,.2f}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="trader", description="交易系统命令行（研究版）")
     sub = p.add_subparsers(dest="group", required=True)
@@ -363,6 +459,19 @@ def build_parser() -> argparse.ArgumentParser:
     ic.add_argument("--session", choices=["rth", "extended"], default="extended")
     ic.add_argument("--rows", type=int, default=5)
     ic.set_defaults(func=cmd_ind_compute)
+
+    st = sub.add_parser("strategies", help="策略").add_subparsers(dest="cmd", required=True)
+    st.add_parser("list", help="列出全部策略").set_defaults(func=cmd_strategies_list)
+
+    bt = sub.add_parser("backtest", help="回测").add_subparsers(dest="cmd", required=True)
+    br = bt.add_parser("run", help="按配置文件运行回测")
+    br.add_argument("config")
+    br.add_argument("--start", help="覆盖配置里的开始日期")
+    br.add_argument("--end", help="覆盖配置里的结束日期")
+    br.set_defaults(func=cmd_backtest_run)
+    bl = bt.add_parser("list", help="最近的回测")
+    bl.add_argument("--limit", type=int, default=20)
+    bl.set_defaults(func=cmd_backtest_list)
     return p
 
 

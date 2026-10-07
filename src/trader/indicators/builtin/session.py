@@ -22,7 +22,7 @@ Anchor = Literal["regular", "day"]
 
 class VwapParams(IndicatorParams):
     anchor: Anchor = Field(
-        "regular",
+        default="regular",
         description="regular：从常规时段开盘起算，盘前没有值；day：从交易日第一个时段起算",
     )
 
@@ -60,7 +60,7 @@ class VWAP(Indicator):
 
 
 class OpeningRangeParams(IndicatorParams):
-    minutes: int = Field(30, ge=1, le=390, description="开盘后多少分钟")
+    minutes: int = Field(default=30, ge=1, le=390, description="开盘后多少分钟")
 
 
 @register_indicator
@@ -100,7 +100,7 @@ class OpeningRange(Indicator):
 
 class PrevDayParams(IndicatorParams):
     sessions: Literal["rth", "extended"] = Field(
-        "rth", description="rth：只看常规时段；extended：含盘前盘后"
+        default="rth", description="rth：只看常规时段；extended：含盘前盘后"
     )
 
 

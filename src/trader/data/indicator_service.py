@@ -8,11 +8,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
 from typing import Any
 
 import polars as pl
 
 from trader.core.models import Bar
+from trader.core.timeutil import NS_PER_DAY
 from trader.core.trading_calendar import SessionFilter, TradingDay
 from trader.data.history import HistoryService
 from trader.indicators.base import Indicator, create
@@ -38,16 +40,48 @@ class IndicatorService:
         """返回列 ts_start, ts_end, <各输出>；只含 ts_start 在 [start, end) 的 bar。"""
         ind = create(name, **params)
         out_keys = [o.key for o in ind.outputs]
-        days = self._days_with_warmup(symbol, timeframe, ind, start, end, session)
         rows: list[list[Any]] = []
-        for day in days:
+        for bar in self._bars(symbol, timeframe, ind, start, end, session):
+            values = ind.update(bar)
+            if bar.ts_start >= start:
+                rows.append([bar.ts_start, bar.ts_end, *(values.get(k) for k in out_keys)])
+        schema = {"ts_start": pl.Int64, "ts_end": pl.Int64, **dict.fromkeys(out_keys, pl.Float64)}
+        return pl.DataFrame(rows, schema=schema, orient="row")
+
+    def warm(
+        self, ind: Indicator, symbol: str, timeframe: str, upto: int, session: SessionFilter
+    ) -> list[Mapping[str, float | None]]:
+        """用 upto 时刻之前已收盘的 bar 预热一个新实例（引擎的活动实例用），返回每根 bar 的输出。
+
+        与 compute 用同样的取数规则，所以预热后的实例与历史计算在 upto 之后的数值相同。
+        """
+        return [
+            ind.update(bar)
+            for bar in self._bars(symbol, timeframe, ind, upto, upto, session)
+            if bar.ts_end <= upto
+        ]
+
+    def _bars(
+        self,
+        symbol: str,
+        timeframe: str,
+        ind: Indicator,
+        start: int,
+        end: int,
+        session: SessionFilter,
+    ) -> Iterator[Bar]:
+        """按预热需求从更早的交易日起逐根产生 bar（ts_start < end）。
+
+        会话指标在每个交易日开始时重置。
+        """
+        for day in self._days_with_warmup(symbol, timeframe, ind, start, end, session):
             if ind.scope == "session":
                 ind.on_session_open(day)
             df = self.history.day_bars(symbol, timeframe, day, session)
             for r in df.iter_rows(named=True):
                 if r["ts_start"] >= end:
-                    break
-                bar = Bar(
+                    return
+                yield Bar(
                     symbol,
                     timeframe,
                     r["ts_start"],
@@ -61,11 +95,6 @@ class IndicatorService:
                     r["session"],
                     r["ts_end"],
                 )
-                values = ind.update(bar)
-                if r["ts_start"] >= start:
-                    rows.append([r["ts_start"], r["ts_end"], *(values.get(k) for k in out_keys)])
-        schema = {"ts_start": pl.Int64, "ts_end": pl.Int64, **dict.fromkeys(out_keys, pl.Float64)}
-        return pl.DataFrame(rows, schema=schema, orient="row")
 
     def _days_with_warmup(
         self,
@@ -77,7 +106,19 @@ class IndicatorService:
         session: SessionFilter,
     ) -> list[TradingDay]:
         cal = self.history.cal
-        days = cal.days_overlapping(start, end)
+        # 涉及的交易日：从 start 所在（或之前最近的）交易日到 end 所在的交易日
+        days = [
+            d
+            for d in cal.days_overlapping(start, max(end, start + 1))
+            if d.start < max(end, start + 1)
+        ]
+        if not days or days[0].start > start:
+            prev = [
+                d
+                for d in cal.days_overlapping(start - 7 * NS_PER_DAY, start + 1)
+                if d.start <= start
+            ]
+            days = prev[-1:] + [d for d in days if not prev or d.day > prev[-1].day]
         if not days:
             return []
         spec = ind.warmup()

@@ -757,25 +757,30 @@ class Broker(Protocol):
 ### 10.1 回测配置
 
 ```yaml
+name: SPY 均线交叉示例        # 实验名称
 strategy: ema_cross
-params: {symbol: AAPL, fast: 9, slow: 21, qty: 100}
-start: 2026-01-05
-end: 2026-03-31
-session: rth                 # rth 或 extended
-warmup_days: 2               # 开始日期之前用于指标预热的交易日数，预热期不下单
+params: {symbol: SPY, timeframe: 1m, fast: 9, slow: 21, notional: 10000}
+start: 2026-09-01
+end: 2026-09-30
+session: rth                 # rth 或 extended（行情与策略周期覆盖的时段）
+trade_extended: false        # 是否允许盘前盘后开仓（只能用 outside_rth 限价单）
+hold_post: false             # false：常规收盘前平仓；true：盘后 20:00 前平仓
 initial_cash: 100000
 sim:
   decision_delay_ms: 0       # 决策到订单生效的额外延迟
-  half_spread_bps: {default: 2, AAPL: 0.5}   # 没有报价数据时使用
+  bar_grace_ms: 300          # bar 封口宽限，与实时一致
+  half_spread_bps: {default: 2, SPY: 0.5}   # 没有报价数据时使用
   impact_k: 10               # 冲击项系数
   impact_min_volume: 1000    # 冲击项使用的 60 秒成交量下限（股）
   market_max_participation: 0.02   # 市价单简化模型的适用上限
   limit_participation: 0.10  # 限价单参与率
-  commission: ibkr_fixed
-  fill_data: bars_1s         # bars_1s 或 ticks
+  commission_per_share: 0.005
+  commission_min: 1.0
   cost_scenarios: [1, 2, 3]  # 成本敏感性的倍数
-risk: {max_position_usd: 20000, max_daily_loss_usd: 500, flatten_before_close_min: 5}
+risk: {max_order_usd: 20000, max_position_usd: 20000, max_daily_loss_usd: 2000, flatten_before_close_min: 5}
 ```
+
+指标预热不需要配置：每个指标按自己声明的预热需求自动往前取数（决策 0004 第 6 条）。
 
 ### 10.2 运行器
 
@@ -1023,15 +1028,16 @@ trader-live --profile live --confirm-live     # 实盘版：真实账户
 - 数据：Massive 1 秒聚合 bar，原始价格，从 2024-01 起；固定清单 22 个标的，见 `config/universe.yaml`（2026-10-07 确认）。暂无 tick 数据。
 - IBKR：使用 IB Gateway；模拟账户已开通；行情订阅为美股 Network A、B、C 一级（非专业）。逐笔成交的并发订阅额度实测为 5 个（第 6 个起报错 10190），清单内其余标的只能用快照行情（2026-10-07 实测）。
 - 时段：研究和交易覆盖全部时段（盘前、常规、盘后），并为 2026-12-06 起的 23/5 交易（夜盘 21:00–04:00，交易日从前一天 21:00 开始）预留，见 `docs/decisions/0002-all-sessions-and-23x5.md`（2026-10-07 确认）。
+- 交易方式（2026-10-07 确认）：允许做空（回测假定可借到券、不计借券费，可按标的关闭）；保证金账户，实盘账户净值约 19.5 万美元，高于 2.5 万美元，不受 PDT 日内交易次数限制；模拟账户额度 105 万美元，但按保守规模使用。
+- 规模（2026-10-07 确认）：回测默认初始资金 10 万美元；单笔金额 5,000～20,000 美元，风控默认单笔和单标的持仓上限 20,000 美元。
+- 持仓时长（2026-10-07 确认）：每天 0～10 笔，持仓几分钟到几小时，1 秒 bar 撮合足够，暂不需要 tick 和报价数据（Massive 的逐笔成交也不在当前订阅内）；价差用清单里每个标的的半价差配置值。
+- 收盘前平仓（2026-10-07 确认）：默认在常规时段收盘前平仓，盘后不持仓；少数策略可以设置为持仓到盘后、20:00 前平仓（盘前盘后只用限价单）。23/5 交易开始后再评估。
 - 运行环境：Windows 11；研究版和实盘版在同一台机器上运行（2026-10-06 确认）。因此两者的端口、运行数据库和日志目录必须在配置中分开，实盘版按第 12.5 节从单独的目录运行。
 
 以下问题会影响具体实现，需要用户在对应阶段开始前回答。
 
 | 事项 | 影响的模块 | 需要在哪个阶段前确认 |
 | --- | --- | --- |
-| 是否需要下载 tick 和报价数据（目前没有，可从 Massive 下载），覆盖哪些标的和日期 | 价差模型用真实价差还是配置值；能否用 tick 撮合 | 阶段 3 |
-| 是否做空；账户是现金账户还是保证金账户，以及账户适用的日内交易规则 | 风控默认值 | 阶段 3 |
-| 典型持仓时长：几秒、几分钟还是更长 | 秒级 bar 是否够用，是否需要 tick 和报价数据 | 阶段 3 |
 | 实盘能否使用资金有限的独立账户或子账户 | 第二道防线 | 阶段 7 |
 | 报警方式：只在界面上提示，还是需要桌面通知或手机消息 | 实盘运行期保护 | 阶段 7 |
 

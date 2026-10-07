@@ -1,0 +1,10 @@
+# 示例回测：NVDA 5 分钟开盘区间突破，括号单止盈止损，允许做空
+name: NVDA 开盘区间突破示例
+strategy: orb_breakout
+params: {symbol: NVDA, timeframe: 5m, minutes: 30, reward: 2.0, notional: 15000, allow_short: true}
+start: 2026-09-01
+end: 2026-09-30
+session: rth
+initial_cash: 100000
+sim:
+  half_spread_bps: {default: 2, NVDA: 1}

@@ -1,6 +1,6 @@
 [project]
 name = "trader"
-version = "0.0.5"
+version = "0.0.6"
 description = "个人美股日内交易系统：研究版与实盘版共用一份核心代码"
 requires-python = ">=3.12"
 # core 依赖组：两个应用都需要
@@ -121,3 +121,21 @@ name = "实盘版入口不导入研究接口和下载器"
 type = "forbidden"
 source_modules = ["trader.apps.live_app"]
 forbidden_modules = ["trader.research", "trader.data.massive", "trader.data.download", "trader.cli"]
+
+[[tool.importlinter.contracts]]
+name = "引擎不导入 IBKR、研究接口、下载器和应用入口"
+type = "forbidden"
+source_modules = ["trader.engine"]
+forbidden_modules = [
+    "trader.brokers.ibkr", "trader.research", "trader.api", "trader.apps",
+    "trader.backtest", "trader.data.massive", "trader.data.download",
+]
+
+[[tool.importlinter.contracts]]
+name = "模拟撮合只依赖 core 和 oms 的回报类型"
+type = "forbidden"
+source_modules = ["trader.brokers.sim"]
+forbidden_modules = [
+    "trader.data", "trader.indicators", "trader.strategy", "trader.engine",
+    "trader.backtest", "trader.research", "trader.api", "trader.apps", "trader.brokers.ibkr",
+]

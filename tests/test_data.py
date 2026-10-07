@@ -210,8 +210,8 @@ def test_history_session_filter_and_range(history):
     part = history.bars("AAA", "1s", TD.open, TD.open + NS_PER_HOUR)
     assert part.height == 120 and part["ts_start"].max() < TD.open + NS_PER_HOUR
     assert history.coverage("AAA") == [date(2026, 1, 5), date(2026, 1, 6)]
-    with pytest.raises(NotImplementedError):
-        history.bars("AAA", "1m", start, end)
+    with pytest.raises(ValueError):
+        history.bars("AAA", "7m", start, end)
 
 
 def test_split_adjustment(history):
@@ -258,7 +258,7 @@ def test_replay_merges_symbols_in_time_order(history):
 
 
 def test_replay_across_days_and_delay(history):
-    feed = HistoricalBarFeed(history, decision_delay_ns=5)
+    feed = HistoricalBarFeed(history, session="rth", decision_delay_ns=5)
     feed.subscribe(["AAA"], {"bar_1s"})
     start = ny_to_ns(date(2026, 1, 5), time(0))
     end = ny_to_ns(date(2026, 1, 7), time(0))
@@ -269,3 +269,24 @@ def test_replay_across_days_and_delay(history):
     assert events[0].meta.available_time == events[0].bar.ts_end + 5
     with pytest.raises(ValueError):
         feed.subscribe(["AAA"], {"tick"})
+
+
+def test_provisional_days_are_redownloaded(tmp_path):
+    """收盘后不久下载的数据是临时数据：下次运行（已过 FINAL_NS）会重新下载一次，之后不再下载。"""
+    client = FakeClient({("SPY", DAY): full_rth(DAY)})
+    store = BarStore(tmp_path)
+    catalog = Catalog(tmp_path / "catalog.sqlite")
+    clock = SimClock(EventScheduler(), start=ny_to_ns(DAY, time(20, 45)))
+    assert (
+        download_symbol(
+            client, store, catalog, CAL, clock, "SPY", DAY, DAY, log=lambda _m: None
+        ).stored
+        == 1
+    )
+    clock.advance_to(ny_to_ns(date(2026, 1, 6), time(6)))
+    client.calls.clear()
+    download_symbol(client, store, catalog, CAL, clock, "SPY", DAY, DAY, log=lambda _m: None)
+    assert client.calls == [("SPY", DAY)]
+    client.calls.clear()
+    download_symbol(client, store, catalog, CAL, clock, "SPY", DAY, DAY, log=lambda _m: None)
+    assert client.calls == []

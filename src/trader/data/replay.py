@@ -11,8 +11,8 @@ from typing import Literal
 
 from trader.core.events import BarEvent
 from trader.core.models import Bar, MarketMeta
-from trader.core.timeutil import NS_PER_SEC, ny_date
-from trader.data.history import HistoryService, SessionFilter
+from trader.core.trading_calendar import SessionFilter, TradingDay
+from trader.data.history import HistoryService
 
 FeedKind = Literal["bar_1s", "tick", "quote"]
 
@@ -27,7 +27,7 @@ class HistoricalBarFeed:
     def __init__(
         self,
         history: HistoryService,
-        session: SessionFilter = "rth",
+        session: SessionFilter = "extended",
         decision_delay_ns: int = 0,
     ) -> None:
         self._history = history
@@ -47,12 +47,11 @@ class HistoricalBarFeed:
 
     def events(self, start: int, end: int) -> Iterator[BarEvent]:
         """输出 ts_start 在 [start, end) 内的 bar，按 (available_time, 订阅顺序) 排列。"""
-        cal = self._history.cal
         seq = 0
-        for day in cal.trading_days(ny_date(start), ny_date(end - 1)):
-            lo, hi = max(start, day.pre_open), min(end, day.post_close)
+        for day in self._history.cal.days_overlapping(start, end):
+            lo, hi = max(start, day.start), min(end, day.end)
             streams = [
-                self._day_stream(rank, sym, lo, hi) for rank, sym in enumerate(self._symbols)
+                self._day_stream(rank, sym, day, lo, hi) for rank, sym in enumerate(self._symbols)
             ]
             for _, _, bar in heapq.merge(*streams):
                 meta = MarketMeta(
@@ -67,9 +66,10 @@ class HistoricalBarFeed:
                 yield BarEvent(bar, meta)
 
     def _day_stream(
-        self, rank: int, symbol: str, lo: int, hi: int
+        self, rank: int, symbol: str, day: TradingDay, lo: int, hi: int
     ) -> Iterator[tuple[int, int, Bar]]:
-        df = self._history.bars(symbol, "1s", lo, hi, session=self._session)
-        for ts, o, h, low, c, v, vw, n in df.iter_rows():
-            # 1 秒 bar 的 ts_end = ts_start + 1s，排序键用它代替可用时间（延迟对所有 bar 相同）
-            yield ts + NS_PER_SEC, rank, Bar(symbol, "1s", ts, o, h, low, c, v, vw, n)
+        df = self._history.day_bars(symbol, "1s", day, self._session)
+        df = df.filter((df["ts_start"] >= lo) & (df["ts_start"] < hi))
+        for ts, te, o, h, low, c, v, vw, n, sess in df.iter_rows():
+            # 延迟对所有 bar 相同，排序键用 ts_end 代替可用时间
+            yield te, rank, Bar(symbol, "1s", ts, o, h, low, c, v, vw, n, sess)

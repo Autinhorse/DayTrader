@@ -11,6 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src" / "trader"
 USER_STRATEGIES = ROOT / "user" / "strategies"
+USER_INDICATORS = ROOT / "user" / "indicators"
 
 # 唯一允许读系统时间的文件
 CLOCK_FILE = SRC / "core" / "clock.py"
@@ -64,7 +65,7 @@ def _py_files(root: Path) -> list[Path]:
 
 def test_no_system_time_outside_clock():
     problems = []
-    for path in _py_files(SRC) + _py_files(USER_STRATEGIES):
+    for path in _py_files(SRC) + _py_files(USER_STRATEGIES) + _py_files(USER_INDICATORS):
         if path == CLOCK_FILE:
             continue
         for hit in _system_time_calls(ast.parse(path.read_text(encoding="utf-8"))):
@@ -92,9 +93,10 @@ def _strategy_violations(source: str) -> list[str]:
     return found
 
 
-def test_user_strategies_constraints():
+def test_user_strategies_and_indicators_constraints():
+    """用户策略和自定义指标：只能用 trader.core / indicators / strategy，不能读写文件、联网。"""
     problems = []
-    for path in _py_files(USER_STRATEGIES):
+    for path in _py_files(USER_STRATEGIES) + _py_files(USER_INDICATORS):
         for hit in _strategy_violations(path.read_text(encoding="utf-8")):
             problems.append(f"{path.relative_to(ROOT)}: {hit}")
     assert not problems, "用户策略违反约束：\n" + "\n".join(problems)

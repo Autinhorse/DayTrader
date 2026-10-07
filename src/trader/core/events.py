@@ -115,6 +115,7 @@ class TimerEvent:
 
 
 class SessionKind(StrEnum):
+    OVERNIGHT_OPEN = "OVERNIGHT_OPEN"  # 夜盘开始 前一天 21:00（23/5 交易开始后才有）
     PRE_OPEN = "PRE_OPEN"  # 盘前开始 04:00
     OPEN = "OPEN"  # 常规时段开盘
     CLOSE = "CLOSE"  # 常规时段收盘（半日市为 13:00）

@@ -64,7 +64,7 @@ def test_session_of(cal):
 
 def test_session_events_in_order(cal):
     events = cal.trading_day(date(2026, 1, 5)).session_events()
-    assert [e.kind for e in events] == list(SessionKind)
+    assert [e.kind for e in events] == [k for k in SessionKind if k != SessionKind.OVERNIGHT_OPEN]
     assert [e.ts for e in events] == sorted(e.ts for e in events)
 
 
@@ -79,3 +79,38 @@ def test_session_of_uses_ny_date(cal):
     # 2026-01-06 00:30 UTC 是纽约 1 月 5 日 19:30，属于 1 月 5 日盘后
     ts = int(datetime(2026, 1, 6, 0, 30, tzinfo=UTC).timestamp()) * 1_000_000_000
     assert cal.session_of(ts) == "post"
+
+
+# ---------- 夜盘（23/5） ----------
+
+
+def test_overnight_sessions_and_trading_date():
+    cal = TradingCalendar(overnight_from=date(2026, 12, 7))
+    mon = cal.trading_day(date(2026, 12, 7))
+    assert mon.has_overnight and [s.name for s in mon.sessions] == [
+        "overnight",
+        "pre",
+        "regular",
+        "post",
+    ]
+    # 周一的夜盘从周日 21:00 开始
+    sun_2130 = ny_to_ns(date(2026, 12, 6), time(21, 30))
+    assert mon.start == ny_to_ns(date(2026, 12, 6), time(21, 0))
+    assert cal.trading_date_of(sun_2130) == date(2026, 12, 7)
+    assert cal.session_of(sun_2130) == "overnight"
+    # 周一 20:30 是暂停时间；21:00 起属于周二
+    assert cal.session_of(ny_to_ns(date(2026, 12, 7), time(20, 30))) is None
+    assert cal.trading_date_of(ny_to_ns(date(2026, 12, 7), time(21, 0))) == date(2026, 12, 8)
+    # 夜盘开始之前的日子没有夜盘
+    assert not cal.trading_day(date(2026, 12, 4)).has_overnight
+    assert cal.trading_day(date(2026, 12, 7)).session_events()[0].kind == SessionKind.OVERNIGHT_OPEN
+
+
+def test_days_overlapping():
+    cal = TradingCalendar()
+    start = ny_to_ns(date(2025, 12, 24), time(12))
+    end = ny_to_ns(date(2025, 12, 26), time(5))
+    assert [d.day for d in cal.days_overlapping(start, end)] == [
+        date(2025, 12, 24),
+        date(2025, 12, 26),
+    ]

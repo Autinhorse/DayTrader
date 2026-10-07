@@ -6,6 +6,9 @@
     trader data report [--symbols ...]          覆盖范围与校验报告
     trader data bars --symbol SPY --date 2026-10-01 [--session extended] [--adjusted]
     trader data compare --date 2026-10-06 [--symbols SPY,QQQ]   与 IBKR 录制数据对比
+    trader data check-agg --symbols SPY --date 2026-10-05   1 分钟 bar 与 Massive 官方对比
+    trader indicators list                      全部指标（内置 + user/indicators/）
+    trader indicators compute --symbol SPY --timeframe 5m --name ema --params period=20 --date D
 
 不带 --symbols 时使用 config/universe.yaml 里的全部标的。
 """
@@ -185,7 +188,7 @@ def cmd_bars(args: argparse.Namespace) -> int:
     hist = HistoryService(data_dir(), cal, catalog)
     td = cal.trading_day(day)
     df = hist.bars(
-        args.symbol.upper(), "1s", td.pre_open, td.post_close, args.session, args.adjusted
+        args.symbol.upper(), args.timeframe, td.start, td.end, args.session, args.adjusted
     )
     fp = catalog.fingerprint(args.symbol.upper(), day)
     catalog.close()
@@ -196,10 +199,10 @@ def cmd_bars(args: argparse.Namespace) -> int:
         pl.col("ts_start")
         .map_elements(lambda t: from_ns(t).strftime("%H:%M:%S"), return_dtype=pl.String)
         .alias("time_ny")
-    ).select("time_ny", "open", "high", "low", "close", "volume", "vwap", "trades")
+    ).select("time_ny", "session", "open", "high", "low", "close", "volume", "vwap", "trades")
     print(
         f"{args.symbol.upper()} {day}（{'常规时段' if args.session == 'rth' else '含盘前盘后'}，"
-        f"{'拆股复权' if args.adjusted else '原始价格'}）共 {df.height:,} 根 1 秒 bar"
+        f"{'拆股复权' if args.adjusted else '原始价格'}）共 {df.height:,} 根 {args.timeframe} bar"
         + ("，半日市" if td.early_close else "")
     )
     print(f"开盘 {from_ns(td.open):%H:%M}，收盘 {from_ns(td.close):%H:%M}（纽约时间），指纹 {fp}")
@@ -215,6 +218,85 @@ def cmd_compare(args: argparse.Namespace) -> int:
 
     syms = _symbols(args.symbols) if args.symbols else None
     return compare_day(date.fromisoformat(args.date), data_dir(), syms)
+
+
+def cmd_check_agg(args: argparse.Namespace) -> int:
+    from trader.data.agg_check import check_day
+
+    cal = TradingCalendar()
+    catalog = _catalog()
+    hist = HistoryService(data_dir(), cal, catalog)
+    client = _client()
+    day = date.fromisoformat(args.date)
+    print(
+        f"{day} 我们由 1 秒 bar 聚合的 1 分钟 bar 与 Massive 官方 1 分钟 bar（全部时段，原始价格）"
+    )
+    for sym in _symbols(args.symbols):
+        r = check_day(client, hist, cal, sym, day)
+        print(
+            f"{sym:<6} 共同 {r['both']} 分钟，完全相同 {r['identical']}，"
+            f"价格不同 {r['price_diff']}，成交量不同 {r['volume_diff']}；"
+            f"只在我们 {r['only_ours']}，只在 Massive {r['only_massive']}"
+        )
+        for e in r["examples"][: args.examples]:  # type: ignore[index]
+            print(f"    {e}")
+    catalog.close()
+    return 0
+
+
+def _user_indicator_dir():
+    return project_dir() / "user" / "indicators"
+
+
+def cmd_ind_list(args: argparse.Namespace) -> int:
+    from trader.indicators.base import list_indicators, load_all
+
+    errors = load_all(_user_indicator_dir())
+    for cls in list_indicators():
+        origin = "自定义" if cls.__module__.startswith("user_indicators") else "内置"
+        params = ", ".join(f"{k}={f.default}" for k, f in cls.Params.model_fields.items())
+        outs = ", ".join(f"{o.key}({o.plot}/{o.pane})" for o in cls.outputs)
+        print(f"{cls.name:<14} [{origin}] {cls.description}")
+        print(f"{'':<14} 参数：{params or '无'}；输出：{outs}；类型：{cls.scope}")
+    for f, e in errors.items():
+        print(f"加载失败 user/indicators/{f}：{e}")
+    return 1 if errors else 0
+
+
+def cmd_ind_compute(args: argparse.Namespace) -> int:
+    from trader.data.indicator_service import IndicatorService
+    from trader.indicators.base import load_all
+
+    errors = load_all(_user_indicator_dir())
+    for f, e in errors.items():
+        print(f"加载失败 user/indicators/{f}：{e}")
+    params: dict[str, object] = {}
+    for kv in args.params or []:
+        k, _, v = kv.partition("=")
+        params[k] = v
+    cal = TradingCalendar()
+    day = date.fromisoformat(args.date)
+    td = cal.trading_day(day)
+    catalog = _catalog()
+    svc = IndicatorService(HistoryService(data_dir(), cal, catalog))
+    df = svc.compute(
+        args.symbol.upper(), args.timeframe, args.name, params, td.start, td.end, args.session
+    )
+    catalog.close()
+    shown = df.with_columns(
+        pl.col("ts_start")
+        .map_elements(lambda t: from_ns(t).strftime("%H:%M:%S"), return_dtype=pl.String)
+        .alias("time_ny")
+    ).drop("ts_start", "ts_end")
+    shown = shown.select("time_ny", *[c for c in shown.columns if c != "time_ny"])
+    print(
+        f"{args.symbol.upper()} {day} {args.timeframe} {args.name} {params or ''}：{df.height} 根"
+    )
+    with pl.Config(tbl_rows=args.rows * 2 + 1, tbl_width_chars=120):
+        print(shown.head(args.rows))
+        print("...")
+        print(shown.tail(args.rows))
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -245,8 +327,9 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--out", help="同时保存到文件")
     r.set_defaults(func=cmd_report)
 
-    b = data.add_parser("bars", help="查看某天的 1 秒 bar")
+    b = data.add_parser("bars", help="查看某天的 bar")
     b.add_argument("--symbol", required=True)
+    b.add_argument("--timeframe", default="1s", help="1s 5s 10s 30s 1m 2m 5m 15m 30m 1h 1d")
     b.add_argument("--date", required=True)
     b.add_argument("--session", choices=["rth", "extended"], default="rth")
     b.add_argument("--adjusted", action="store_true", help="按拆股复权")
@@ -257,6 +340,25 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--symbols", help="默认录制到的全部标的")
     c.add_argument("--date", required=True)
     c.set_defaults(func=cmd_compare)
+
+    k = data.add_parser("check-agg", help="我们的 1 分钟 bar 与 Massive 官方 1 分钟 bar 对比")
+    k.add_argument("--symbols")
+    k.add_argument("--date", required=True)
+    k.add_argument("--examples", type=int, default=3, help="每个标的列出几条不一致的分钟")
+    k.set_defaults(func=cmd_check_agg)
+
+    ind = sub.add_parser("indicators", help="指标").add_subparsers(dest="cmd", required=True)
+    il = ind.add_parser("list", help="列出全部指标")
+    il.set_defaults(func=cmd_ind_list)
+    ic = ind.add_parser("compute", help="计算某天的指标")
+    ic.add_argument("--symbol", required=True)
+    ic.add_argument("--timeframe", default="1m")
+    ic.add_argument("--name", required=True)
+    ic.add_argument("--params", nargs="*", help="参数，例如 period=20 source=close")
+    ic.add_argument("--date", required=True)
+    ic.add_argument("--session", choices=["rth", "extended"], default="extended")
+    ic.add_argument("--rows", type=int, default=5)
+    ic.set_defaults(func=cmd_ind_compute)
     return p
 
 

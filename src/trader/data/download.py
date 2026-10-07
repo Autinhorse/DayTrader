@@ -3,6 +3,9 @@
 增量：只请求区间内尚未处理过的交易日，所以"往前补一段"、"更新到今天"、"新增标的"
 都是同一个操作——对指定标的下载指定区间。尚未收盘完毕的当天不下载。
 每天的数据经校验后写入并登记到 catalog；校验有错误的日期不写入，下次会重试。
+
+Massive 在收盘后几小时内还会补充迟到的成交（实测收盘后 30 分钟下载的数据，第二天再下载
+行数和成交量都会增加）。所以盘后结束不到 FINAL_NS 就下载的数据只算临时数据，下次运行时自动重新下载。
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ from typing import Protocol
 import polars as pl
 
 from trader.core.clock import Clock
-from trader.core.timeutil import NS_PER_MIN, ny_date
+from trader.core.timeutil import NS_PER_HOUR, NS_PER_MIN, ny_date
 from trader.core.trading_calendar import TradingCalendar
 from trader.data.catalog import Catalog
 from trader.data.corporate_actions import ACTION_SCHEMA, replace_symbol_actions
@@ -26,8 +29,10 @@ from trader.data.massive import Cancelled, MassiveClient
 from trader.data.store import BarStore, fingerprint
 from trader.data.validate import DEFAULT_GAP_THRESHOLD_S, validate_day
 
-# 盘后结束后再等这么久才认为当天数据完整
+# 盘后结束后至少等这么久才下载当天数据
 SETTLE_NS = 30 * NS_PER_MIN
+# 盘后结束后过了这么久下载的数据才算最终数据；之前下载的下次自动重新下载
+FINAL_NS = 8 * NS_PER_HOUR
 
 
 class BarSource(Protocol):
@@ -74,8 +79,12 @@ def plan_days(
     days = complete_days(cal, start, end, now)
     if redownload:
         return days
-    known = catalog.known_days(symbol)
-    return [d for d in days if d not in known]
+    final = {
+        p.day
+        for p in catalog.partitions(symbol)
+        if p.imported_at >= cal.trading_day(p.day).end + FINAL_NS
+    }
+    return [d for d in days if d not in final]
 
 
 def download_symbol(

@@ -17,8 +17,17 @@ uv run trader data update            :: 清单内标的更新到最新交易日
 uv run trader data report            :: 数据覆盖与校验报告
 uv run trader data bars --symbol SPY --date 2026-10-01
 uv run python tools/ib_record.py     :: IBKR 只读行情录制（只连模拟端口 4002）
-uv run trader data compare --symbol SPY --date <录制日期>
+uv run trader data compare --date <录制日期>
+uv run trader data bars --symbol SPY --date 2026-10-05 --timeframe 5m --session extended
+uv run trader data check-agg --symbols SPY --date 2026-10-05   :: 1 分钟 bar 与 Massive 官方对比
+uv run trader indicators list                                  :: 内置 + user/indicators/ 的指标
+uv run trader indicators compute --symbol SPY --timeframe 5m --name ema --params period=20 --date 2026-10-05
 ```
+
+聚合：`trader.core.aggregation.BarAggregator`（增量，回测/实时用）与 `trader.data.aggregate`（向量化，历史/图表用）
+规则必须一致，`tests/test_aggregation.py` 保证。bar 不跨时段，见 docs/decisions/0003。
+指标：继承 `trader.indicators.base.Indicator` 并 `@register_indicator`；内置在 `src/trader/indicators/builtin/`，
+自定义放 `user/indicators/`（自动发现）。
 
 数据：`data/bars/1s/symbol=X/date=Y.parquet`（原始价格）、`data/catalog.sqlite`、`data/corporate_actions.parquet`、
 `data/live/<日期>/`（IBKR 录制）。Massive key 在 `.env` 的 `MASSIVE_API_KEY`（旧的 `config.json` 也认）。

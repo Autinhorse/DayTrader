@@ -64,9 +64,7 @@ def validate_day(
         "vwap_outside_range",
         _count(df, (pl.col("vwap") > hi) | (pl.col("vwap") < lo)),
     )
-    put(
-        check.warnings, "outside_sessions", _count(df, (ts < day.pre_open) | (ts >= day.post_close))
-    )
+    put(check.warnings, "outside_sessions", _count(df, (ts < day.start) | (ts >= day.end)))
 
     # 常规时段内的长空档：包括开盘到第一根、最后一根到收盘
     rth = df.filter((ts >= day.open) & (ts < day.close))["ts_start"].to_list()

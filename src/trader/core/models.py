@@ -42,7 +42,10 @@ class MarketMeta:
 
 @dataclass(frozen=True, slots=True)
 class Bar:
-    """区间 [ts_start, ts_end) 的 OHLCV。没有合格成交的区间没有 bar，不补空 bar。"""
+    """区间 [ts_start, ts_end) 的 OHLCV。没有合格成交的区间没有 bar，不补空 bar。
+
+    bar 不跨时段：时段末尾不足一个周期的 bar 在时段结束时收盘（closes_at），日线在交易日结束时收盘。
+    """
 
     symbol: str
     timeframe: str  # "1s" "5s" "1m" "5m" "15m" "1h" "1d"
@@ -54,9 +57,13 @@ class Bar:
     volume: float
     vwap: float | None = None
     trades: int | None = None
+    session: str | None = None  # "overnight" "pre" "regular" "post"；日线为 None
+    closes_at: int | None = None  # 不足一个周期的 bar 和日线的实际收盘时间
 
     @property
     def ts_end(self) -> int:
+        if self.closes_at is not None:
+            return self.closes_at
         return self.ts_start + timeframe_ns(self.timeframe)
 
 

@@ -12,8 +12,8 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
-import sqlite3
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -21,6 +21,7 @@ from typing import Any
 
 import polars as pl
 
+from trader.backtest import experiments
 from trader.backtest.config import BacktestConfig
 from trader.backtest.report import (
     build_trades,
@@ -95,7 +96,14 @@ def run_backtest(
     out_root: Path | None = None,
     initial_state: dict[str, Any] | None = None,
     write: bool = True,
+    progress: Callable[[int, int], None] | None = None,
+    index_extra: dict[str, str] | None = None,
 ) -> BacktestResult:
+    """运行一次回测。
+
+    progress(已完成交易日数, 总交易日数)；
+    index_extra 写入实验索引（notes、tags、sweep_id、sample）。
+    """
     errors = load_all(project_dir / "user" / "indicators")
     errors |= load_user_strategies(project_dir / "user" / "strategies")
     if errors:
@@ -138,7 +146,13 @@ def run_backtest(
         days = cal.trading_days(cfg.start, cfg.end)
         if not days:
             raise ValueError(f"{cfg.start} ~ {cfg.end} 没有交易日")
-        res = engine.run(strategy_cls, params, days[0].start, days[-1].end)
+        res = engine.run(
+            strategy_cls,
+            params,
+            days[0].start,
+            days[-1].end,
+            progress=(lambda k: progress(k, len(days))) if progress else None,
+        )
 
         orders = orders_frame(res.orders)
         fills = fills_frame(res)
@@ -176,19 +190,25 @@ def run_backtest(
         result = BacktestResult(run_id, None, cfg, summary, orders, fills, trades, equity, res)
         if write:
             out_root = out_root or project_dir / "runs"
-            result.out_dir = _write(result, out_root, repro, created.isoformat())
+            result.out_dir = _write(result, out_root, repro, created.isoformat(), index_extra or {})
         return result
     finally:
         catalog.close()
 
 
-def _write(r: BacktestResult, out_root: Path, repro: dict[str, Any], created: str) -> Path:
-    out = out_root / r.run_id
+def _write(
+    r: BacktestResult, out_root: Path, repro: dict[str, Any], created: str, extra: dict[str, str]
+) -> Path:
+    out_root.mkdir(parents=True, exist_ok=True)
     n = 1
-    while out.exists():
-        n += 1
-        out = out_root / f"{r.run_id}-{n}"
-    out.mkdir(parents=True)
+    while True:  # 并行运行时可能同名，靠 mkdir 的原子性避免冲突
+        out = out_root / (r.run_id if n == 1 else f"{r.run_id}-{n}")
+        try:
+            out.mkdir()
+            break
+        except FileExistsError:
+            n += 1
+    r.run_id = out.name
     cfg_json = json.loads(r.config.model_dump_json())
     (out / "config.json").write_text(
         json.dumps(
@@ -209,29 +229,24 @@ def _write(r: BacktestResult, out_root: Path, repro: dict[str, Any], created: st
     (out / "summary.json").write_text(
         json.dumps(r.summary, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
     )
-    with sqlite3.connect(out_root / "index.sqlite") as db:
-        db.execute(
-            "CREATE TABLE IF NOT EXISTS runs (run_id TEXT PRIMARY KEY, name TEXT, strategy TEXT, "
-            "params TEXT, start TEXT, end TEXT, created TEXT, trades INTEGER, net_pnl REAL, "
-            "path TEXT, git TEXT, data TEXT)"
-        )
-        db.execute(
-            "INSERT OR REPLACE INTO runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                out.name,
-                r.config.name,
-                r.config.strategy,
-                json.dumps(r.config.params, ensure_ascii=False),
-                r.config.start.isoformat(),
-                r.config.end.isoformat(),
-                created,
-                r.summary["counts"]["trades"],
-                r.summary["pnl"]["net_pnl"],
-                str(out),
-                repro.get("git_commit"),
-                json.dumps(repro.get("data_fingerprints")),
-            ),
-        )
+    experiments.register(
+        out_root / "index.sqlite",
+        {
+            "run_id": out.name,
+            "name": r.config.name,
+            "strategy": r.config.strategy,
+            "params": json.dumps(r.config.params, ensure_ascii=False, sort_keys=True),
+            "start": r.config.start.isoformat(),
+            "end": r.config.end.isoformat(),
+            "created": created,
+            "trades": r.summary["counts"]["trades"],
+            "net_pnl": r.summary["pnl"]["net_pnl"],
+            "path": str(out),
+            "git": repro.get("git_commit"),
+            "data": json.dumps(repro.get("data_fingerprints")),
+            **extra,
+        },
+    )
     return out
 
 

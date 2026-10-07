@@ -106,9 +106,8 @@ Oct 6, 2026 · @Rex
 | 运行记录 | SQLite | 订单、成交、回测索引、事件日志索引 |
 | 交易日历 | exchange\_calendars | 开收盘时间、半日市、节假日 |
 | 配置与校验 | pydantic、pydantic-settings，YAML 配置文件 |  |
-| 后端服务 | FastAPI，REST 加 WebSocket | 只监听 127.0.0.1 |
-| 前端 | React、TypeScript、Vite |  |
-| 图表 | TradingView Lightweight Charts（开源库） | K 线、指标窗格、买卖点标记 |
+| 界面 | PySide6 桌面程序（决策 0005） | 可停靠、可拖出成独立窗口的面板；实盘版界面与引擎分属两个进程，本机通信只监听 127.0.0.1 |
+| 图表 | TradingView Lightweight Charts 5（开源库），嵌在 QWebEngineView 中 | K 线、指标窗格、买卖点标记 |
 | 研究 | JupyterLab | 只属于研究版依赖组 |
 | 质量工具 | pytest、ruff、pyright、import-linter | import-linter 用于强制分层 |
 
@@ -133,7 +132,7 @@ trader/
       ibkr/        # IBKR 行情源与执行器（仅实盘版可导入）
     backtest/      # 回测运行器、统计、参数扫描
     research/      # notebook 接口（仅研究版可导入）
-    api/           # FastAPI 路由与 WebSocket
+    gui/           # PySide6 界面（研究版；实盘版界面在阶段 6 加入）
     apps/
       research_app.py   # 入口：trader-research
       live_app.py       # 入口：trader-live
@@ -141,7 +140,6 @@ trader/
     indicators/    # 用户自定义指标，自动发现
     strategies/    # 用户策略，自动发现
     notebooks/
-  web/             # 前端工程
   data/            # 行情数据（不进 git）
   runs/            # 回测与运行结果（不进 git）
   tests/
@@ -851,9 +849,9 @@ Notebook 接口是补充手段，用于界面没有覆盖的自由分析；日�
 5. **保存和比较实验**：每次回测可以命名、加备注和标签。实验列表按策略、参数、日期筛选；选中两次或多次回测并排比较统计和权益曲线，并标出它们在参数、数据和撮合假设上的差别。
 6. **参数扫描**：在表单中给参数填多个取值即可发起扫描，结果以参数对比表呈现，每一行可以点进去看单次回测。
 
-## 11. 模块七：API 服务与界面（`trader.api`、`web/`）
+## 11. 模块七：界面（`trader.gui`）
 
-界面是一个本地 Web 应用，研究版和实盘版用同一份前端构建产物，后端通过能力开关决定显示哪些功能。
+（按决策记录 `docs/decisions/0005-desktop-ui.md` 修订：界面是 PySide6 桌面程序，面板可停靠、可拖出成独立窗口，图表可以开任意多个。研究版界面直接调用数据、指标和回测模块；实盘版界面与交易引擎分属两个进程，下表的接口清单作为两者通信协议的功能清单，在阶段 6 定具体实现。）
 
 ### 11.1 后端接口
 

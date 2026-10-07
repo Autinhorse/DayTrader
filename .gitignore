@@ -8,3 +8,4 @@ config.json
 .ruff_cache/
 *.egg-info/
 *.png
+config/research_gui.ini

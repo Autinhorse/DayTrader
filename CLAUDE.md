@@ -7,6 +7,7 @@
 ## 常用命令
 
 ```bat
+uv run trader-research  :: 研究版桌面程序（图表、回测、结果、实验对比、参数扫描、数据管理）
 uv sync                 :: 安装/同步依赖（新增依赖前先说明理由）
 check.bat               :: 全部质量检查：ruff、ruff format、pyright、pytest、lint-imports
 uv run pytest           :: 只跑测试
@@ -34,6 +35,9 @@ uv run trader backtest list
 策略：继承 `trader.strategy.base.Strategy` 并 `@register_strategy`，放 `user/strategies/`；示例 ema_cross、orb_breakout。
 回测：`trader.backtest.runner.run_backtest(config)`；引擎 `trader.engine.engine.BacktestEngine`；
 撮合 `trader.brokers.sim.matcher`；订单与风控 `trader.oms`。实现约定见 docs/decisions/0004。
+界面：PySide6 桌面程序（决策 0005），`trader.gui`；图表是 QWebEngineView 里的 Lightweight Charts
+（`src/trader/gui/assets/`）。回测与参数扫描在子进程 `python -m trader.backtest.worker` 里运行。
+界面改动后用 QWidget.grab() 截图检查外观（测试只覆盖逻辑）。
 
 数据：`data/bars/1s/symbol=X/date=Y.parquet`（原始价格）、`data/catalog.sqlite`、`data/corporate_actions.parquet`、
 `data/live/<日期>/`（IBKR 录制）。Massive key 在 `.env` 的 `MASSIVE_API_KEY`（旧的 `config.json` 也认）。

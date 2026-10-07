@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #131722;
+               font-family: "Microsoft YaHei", "Segoe UI", sans-serif; }
+  #chart { position: absolute; inset: 0; }
+  #legend { position: absolute; left: 8px; top: 6px; z-index: 10; color: #d1d4dc; font-size: 12px;
+            pointer-events: none; line-height: 1.5; white-space: nowrap; }
+  #legend .t { color: #9598a1; }
+  #empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+           color: #787b86; font-size: 14px; }
+</style>
+<script src="lightweight-charts.standalone.production.js"></script>
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+</head>
+<body>
+<div id="chart"></div>
+<div id="legend"></div>
+<div id="empty">没有数据</div>
+<script src="chart.js"></script>
+</body>
+</html>

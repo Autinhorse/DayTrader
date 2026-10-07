@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import bisect
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -189,6 +189,7 @@ class BacktestEngine:
         self.marks: list[dict[str, Any]] = []
         self.logs: list[dict[str, Any]] = []
         self._days: list[date] = []
+        self._progress: Callable[[int], None] | None = None
 
     # ---------- 订阅、指标、历史 ----------
 
@@ -226,8 +227,14 @@ class BacktestEngine:
     # ---------- 主循环 ----------
 
     def run(
-        self, strategy_cls: type[Strategy], params: StrategyParams, start: int, end: int
+        self,
+        strategy_cls: type[Strategy],
+        params: StrategyParams,
+        start: int,
+        end: int,
+        progress: Callable[[int], None] | None = None,
     ) -> EngineResult:
+        """progress(k)：第 k 个交易日开始时调用，用于界面显示进度。"""
         from trader.data.replay import HistoricalBarFeed
 
         days = self.cal.days_overlapping(start, end)
@@ -236,6 +243,7 @@ class BacktestEngine:
         start = max(start, days[0].start) if days else start
         self.clock.advance_to(start)
         self._day = None
+        self._progress = progress
         self.strategy = strategy_cls(params, self.ctx)
         self.ctx.state_obj = StrategyState(self.cfg.initial_state)
         # 当前时刻已经在某个交易日里（例如盘中启动），先完成这一天的开始处理
@@ -370,6 +378,8 @@ class BacktestEngine:
     def _begin_day(self, day: TradingDay, now: int) -> None:
         self._day = day
         self._days.append(day.day)
+        if self._progress is not None:
+            self._progress(len(self._days) - 1)
         ss = self.oms.session
         ss.flattening = False
         ss.regular_open = day.open

@@ -11,6 +11,7 @@ Massive 官方 1 分钟 bar，没下载官方数据的日子退回用 1 秒 bar 
 from __future__ import annotations
 
 import os
+import uuid
 from datetime import date
 from pathlib import Path
 
@@ -87,17 +88,29 @@ class HistoryService:
         fp_1m = self.catalog.fingerprint(symbol, day.day, kind="bar_1m") or "none"
         path = self._cache_path(symbol, timeframe, day.day, session, f"{fp[:12]}{fp_1m[:8]}")
         if self.use_cache and path.exists():
-            return pl.read_parquet(path)
+            try:
+                return pl.read_parquet(path)
+            except (OSError, pl.exceptions.ComputeError):
+                pass  # 另一个进程正在替换这个文件：重新计算
         official = self.minute_store.read_day(symbol, day.day) if fp_1m != "none" else None
         out = aggregate_day(self.store.read_day(symbol, day.day), day, timeframe, session, official)
         if self.use_cache:
-            for old in path.parent.glob(f"date={day.day.isoformat()}.*.parquet"):
+            self._write_cache(path, day.day, out)
+        return out
+
+    @staticmethod
+    def _write_cache(path: Path, day: date, out: pl.DataFrame) -> None:
+        """多个回测进程可能同时写同一份缓存：临时文件名各不相同，替换失败也不影响结果。"""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        for old in path.parent.glob(f"date={day.isoformat()}.*.parquet"):
+            if old.name != path.name:  # 只删指纹不同的旧缓存
                 old.unlink(missing_ok=True)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_name(path.name + ".tmp")
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+        try:
             out.write_parquet(tmp)
             os.replace(tmp, path)
-        return out
+        except OSError:
+            tmp.unlink(missing_ok=True)
 
     def _cache_path(
         self, symbol: str, timeframe: str, day: date, session: SessionFilter, fp: str

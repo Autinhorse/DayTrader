@@ -1,10 +1,11 @@
 # 固定的研究与交易标的清单（DESIGN.md 12.2）。研究版和实盘版共用。
 # 每项可以只写代码，也可以写成 {symbol: ..., half_spread: ..., feed: tick|snapshot, shortable: ...}
+# feed：实盘行情订阅方式，tick = 逐笔成交（账户额度 5 个），其余默认 snapshot（快照，降级）。
 # 注意：清单是人工挑选的，回测结果带有选择偏差。
 symbols:
   # 指数与行业 ETF
-  - SPY
-  - QQQ
+  - {symbol: SPY, feed: tick}
+  - {symbol: QQQ, feed: tick}
   - DIA
   - IWM
   - XLF
@@ -13,10 +14,10 @@ symbols:
   - TLT
   - GLD
   # 个股
-  - AAPL
+  - {symbol: AAPL, feed: tick}
   - MSFT
-  - NVDA
-  - TSLA
+  - {symbol: NVDA, feed: tick}
+  - {symbol: TSLA, feed: tick}
   - AMD
   - AMZN
   - META

@@ -123,6 +123,10 @@ class HistoryService:
             / f"date={day.isoformat()}.{fp}.parquet"
         )
 
+    def seed_bars(self, symbol: str, start: int, end: int, session: SessionFilter) -> pl.DataFrame:
+        """引擎盘中订阅时用来填充正在形成的聚合 bar 的细粒度数据（这里就是 1 秒 bar）。"""
+        return self.bars(symbol, "1s", start, end, session)
+
     def coverage(self, symbol: str) -> list[date]:
         """有数据的交易日期。"""
         return [p.day for p in self.catalog.partitions(symbol) if p.rows > 0]

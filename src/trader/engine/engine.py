@@ -11,11 +11,15 @@
 
 1 分钟及以上周期 bar 的成交量、vwap、成交笔数用 Massive 官方 1 分钟 bar 汇总（与历史查询一致，
 见 docs/decisions/0003 第 5 条）；开高低收由 1 秒 bar 增量聚合。
+
+实时运行（local_paper / broker_paper）用同一个引擎：start(live=True) 不读历史行情文件，
+1 秒 bar 由外部的实时行情源通过 push() 送入，驱动方按本机时间调用 advance(now)（决策 0007）。
 """
 
 from __future__ import annotations
 
 import bisect
+import dataclasses
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
@@ -198,6 +202,9 @@ class BacktestEngine:
         self._events: Iterator[BarEvent] = iter(())
         self._next: BarEvent | None = None
         self._started = False
+        self._live: deque[BarEvent] | None = None  # 实时模式：外部推入的 1 秒 bar
+        self.on_new_symbol: Callable[[str], None] | None = None  # 实时模式：通知行情源订阅
+        self.late_bars = 0  # 实时模式：推入时可用时间已过的 bar 数
         # 界面等外部观察者：收盘 bar、订单与成交通知
         self.bar_listeners: list[Callable[[Bar], None]] = []
         self.notice_listeners: list[Callable[[Notice], None]] = []
@@ -215,10 +222,15 @@ class BacktestEngine:
             return
         new_symbol = all(s != symbol for s, _ in self._subs)
         self._subs.add(key)
-        if new_symbol and self._feed_end is not None:
+        if new_symbol and self._live is not None:
+            if self.on_new_symbol is not None:
+                self.on_new_symbol(symbol)
+        elif new_symbol and self._feed_end is not None:
             self._rebuild_feed()
         if timeframe != "1s":
-            self._aggs[key] = BarAggregator(symbol, timeframe, self.cal, self.cfg.session)
+            agg = BarAggregator(symbol, timeframe, self.cal, self.cfg.session)
+            self._seed_aggregator(agg, symbol)
+            self._aggs[key] = agg
         # 已收盘的历史 bar（当前时刻之前已可用）
         now = self.clock.now()
         lookback_days = 1 if timeframe_ns(timeframe) < NS_PER_MIN else 30
@@ -230,6 +242,24 @@ class BacktestEngine:
             if r["ts_end"] + self.grace <= now:
                 dq.append(_row_bar(symbol, timeframe, r))
         self._bars[key] = dq
+
+    def _seed_aggregator(self, agg: BarAggregator, symbol: str) -> None:
+        """盘中订阅：用当天此刻之前已可用的数据填入正在形成的 bar，避免第一根 bar 残缺。
+
+        期间收盘的 bar 已经在历史里，丢弃；只保留未收盘的部分。
+        """
+        now = self.clock.now()
+        loc = self.cal.locate(now)
+        if loc is None or loc[0].start >= now:
+            return
+        rows = self.history.seed_bars(symbol, loc[0].start, now, self.cfg.session)
+        for r in rows.iter_rows(named=True):
+            if r["ts_end"] + self.grace <= now:
+                agg.update(_row_bar(symbol, "1s", r))
+        t = agg.next_close_time()
+        while t is not None and t + self.grace <= now:
+            agg.on_time(t)
+            t = agg.next_close_time()
 
     def indicator(
         self, name: str, symbol: str, timeframe: str, *, claim: bool = True, **params: Any
@@ -270,8 +300,14 @@ class BacktestEngine:
         *,
         watch: list[str] | None = None,
         progress: Callable[[int], None] | None = None,
+        live: bool = False,
     ) -> None:
-        """准备运行区间 [start, end)。回放可以不带策略（纯手动练习），之后再挂载。"""
+        """准备运行区间 [start, end)。回放可以不带策略（纯手动练习），之后再挂载。
+
+        live=True：实时模式，行情由 push() 送入；end 只决定排入哪些交易日的时段事件。
+        """
+        if live:
+            self._live = deque()
         days = self.cal.days_overlapping(start, end)
         start = max(start, days[0].start) if days else start
         for d in days:
@@ -289,16 +325,50 @@ class BacktestEngine:
             self._seed_last_price(sym, start)
         if strategy_cls is not None:
             self.attach_strategy(strategy_cls, params or strategy_cls.Params())
+        if live:
+            self._started = True
+            return
         self._feed_end = end
         self._rebuild_feed()
 
+    def push(self, events: list[BarEvent]) -> None:
+        """实时模式：送入已封口的 1 秒 bar。可用时间早于引擎时钟的（处理滞后）按当前时刻交付，
+        记 late 标记；同一批按可用时间排序。"""
+        assert self._live is not None, "push() 只用于实时模式"
+        now = self.clock.now()
+        for ev in sorted(events, key=lambda e: e.available_time):
+            if ev.available_time < now:
+                self.late_bars += 1
+                meta = dataclasses.replace(
+                    ev.meta, available_time=now, quality_flags=ev.meta.quality_flags | {"late"}
+                )
+                ev = dataclasses.replace(ev, meta=meta)
+            if self._live and ev.available_time < self._live[-1].available_time:
+                meta = dataclasses.replace(ev.meta, available_time=self._live[-1].available_time)
+                ev = dataclasses.replace(ev, meta=meta)
+            self._live.append(ev)
+
     def _seed_last_price(self, symbol: str, now: int) -> None:
-        """盘中开始时：用此刻之前最后一根已可用的 1 秒 bar 设定最新价（风控和下单需要）。"""
+        """盘中开始时：用此刻之前最后一根已可用的 bar 设定最新价（风控和下单需要）。
+
+        优先 1 秒 bar；当天没有 1 秒数据时（例如实时运行时只有 IB 的 1 分钟补数）用更粗的数据，
+        取两者中较晚的一根。
+        """
+        best: tuple[int, float] | None = None
         dq = self._bars.get((symbol, "1s"))
         if dq:
-            last = dq[-1]
-            self.portfolio.update_mark(symbol, last.close)
-            self.oms.last_bar_time[symbol] = last.ts_end + self.grace
+            best = (dq[-1].ts_end, dq[-1].close)
+        loc = self.cal.locate(now)
+        if loc is not None:
+            rows = self.history.seed_bars(symbol, loc[0].start, now, self.cfg.session)
+            rows = rows.filter(rows["ts_end"] + self.grace <= now)
+            if not rows.is_empty():
+                r = rows.row(-1, named=True)
+                if best is None or r["ts_end"] > best[0]:
+                    best = (r["ts_end"], r["close"])
+        if best is not None:
+            self.portfolio.update_mark(symbol, best[1])
+            self.oms.last_bar_time[symbol] = best[0] + self.grace
 
     def attach_strategy(self, strategy_cls: type[Strategy], params: StrategyParams) -> None:
         """挂载策略（回测开始时，或回放中途）。指标只用此刻之前已可用的数据预热。
@@ -341,7 +411,10 @@ class BacktestEngine:
 
     def next_time(self) -> int | None:
         """下一个要处理的事件时间；没有了返回 None。"""
-        t_feed = self._next.available_time if self._next is not None else None
+        if self._live is not None:
+            t_feed = self._live[0].available_time if self._live else None
+        else:
+            t_feed = self._next.available_time if self._next is not None else None
         times = [
             t for t in (t_feed, self.scheduler.peek_time(), self._next_agg_close()) if t is not None
         ]
@@ -357,6 +430,9 @@ class BacktestEngine:
                 break
             self.clock.advance_to(now)
             batch: list[BarEvent] = []
+            if self._live is not None:
+                while self._live and self._live[0].available_time == now:
+                    batch.append(self._live.popleft())
             while self._next is not None and self._next.available_time == now:
                 batch.append(self._next)
                 self._next = next(self._events, None)

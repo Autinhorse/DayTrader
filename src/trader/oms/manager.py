@@ -42,7 +42,7 @@ from trader.oms.orders import (
     reduce_commission,
 )
 from trader.oms.portfolio import Portfolio
-from trader.oms.risk import Reject, RiskLimits, RiskView, check, signature
+from trader.oms.risk import Reject, RiskLimits, RiskView, check, is_exit, signature
 
 
 class ExecutionVenue(Protocol):
@@ -99,6 +99,10 @@ class OrderManager:
     outbox: list[tuple[str, Order, OrderIntent | None, int]] = field(default_factory=list)
     id_provider: Callable[[str], str] | None = None
     _flatten_pending: dict[str, tuple[str, bool]] = field(default_factory=dict)
+    # 人工暂停（实盘版）：被暂停的来源只能发减仓单；halt_all_new 对所有来源生效
+    halted: set[str] = field(default_factory=set)
+    halt_all_new: bool = False
+    commission_log: list[CommissionUpdate] = field(default_factory=list)  # 落盘用
     _notes_seen: dict[str, int] = field(default_factory=dict)
 
     # ---------- 标的归属（DESIGN.md 7.4） ----------
@@ -190,6 +194,12 @@ class OrderManager:
         self.orders[order.client_order_id] = order
         view = self.view(now, intent.source, exclude=order.client_order_id)
         rej = check(intent, view, self.limits, exit_order=exit_order)
+        halted = self.halt_all_new or intent.source in self.halted
+        if rej is None and halted:
+            exiting = exit_order if exit_order is not None else is_exit(intent, view)
+            if not exiting:
+                why = "已停止新开仓" if self.halt_all_new else f"{intent.source} 已暂停"
+                rej = Reject("halted", why + "，只允许减仓")
         self._recent.setdefault(intent.source, []).append(now)
         self._signatures.setdefault(intent.source, []).append((now, signature(intent)))
         self._trim(intent.source, now)
@@ -295,6 +305,7 @@ class OrderManager:
                 return
             added = reduce_commission(self.orders[coid], u)
             if added:
+                self.commission_log.append(u)
                 self.exec_commission[base] = self.exec_commission.get(base, Decimal(0)) + added
                 self.portfolio.apply_commission(added)
             return

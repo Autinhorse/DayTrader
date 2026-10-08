@@ -28,6 +28,7 @@ uv run trader indicators compute --symbol SPY --timeframe 5m --name ema --params
 uv run trader strategies list                                  :: user/strategies/ 的策略
 uv run trader backtest run config/backtests/orb_nvda.yaml      :: 结果写入 runs/<run_id>/
 uv run trader backtest list
+uv run trader-live --profile local_paper [--start-strategy] [--minutes 10]   :: 实时行情 + 本地模拟成交（只读连接模拟端口）
 ```
 
 聚合：`trader.core.aggregation.BarAggregator`（增量，回测/实时用）与 `trader.data.aggregate`（向量化，历史/图表用）
@@ -44,6 +45,11 @@ uv run trader backtest list
 查询一律截止到回放时钟。notebook：`from trader.research import load_bars, compute_indicator, run_backtest,
 load_run, sweep`，示例 `user/notebooks/`。见 docs/decisions/0006。
 给用户的扩展说明（新指标、新策略、新图表）：docs/扩展指南.md。
+实盘版（阶段 6，决策 0007）：`trader.live.runner.LiveRunner` + `trader.brokers.ibkr`（`api.IbApi` 薄接口，
+测试用 `tests/fake_ib.py`，永不连接真实 IBKR）；实时 1 秒 bar 由 `trader.data.bar_builder` 生成，
+当天历史 `trader.data.live_history.LiveHistory`；引擎 `start(live=True)` + `push()`。
+落盘与恢复 `trader.oms.journal`；配置 `config/local_paper.yaml`（风控阈值必须全部显式）。
+阶段 6 只允许模拟端口 4002/7497 和 DU 开头的模拟账户，live 配置一律拒绝。
 
 数据：`data/bars/1s/symbol=X/date=Y.parquet`（原始价格）、`data/catalog.sqlite`、`data/corporate_actions.parquet`、
 `data/live/<日期>/`（IBKR 录制）。Massive key 在 `.env` 的 `MASSIVE_API_KEY`（旧的 `config.json` 也认）。

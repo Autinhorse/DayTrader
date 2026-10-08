@@ -10,7 +10,7 @@ import pytest
 from trader.core.models import Fill, Order, OrderIntent, OrderStatus, OrderType, Reason, Side
 from trader.core.timeutil import NS_PER_MIN, NS_PER_SEC
 from trader.oms.manager import OrderManager
-from trader.oms.orders import Accepted, BrokerUpdate, Cancelled, reduce
+from trader.oms.orders import Accepted, BrokerUpdate, Cancelled, Replaced, reduce
 from trader.oms.portfolio import Portfolio
 from trader.oms.risk import RiskLimits, RiskView, check
 
@@ -157,8 +157,8 @@ class FakeVenue:
         self.cancelled.append(client_order_id)
         return [Cancelled(client_order_id, now)]
 
-    def modify(self, order: Order, effective: int) -> None:
-        pass
+    def modify(self, order: Order, new_intent, effective: int, now: int) -> list[BrokerUpdate]:  # noqa: ANN001
+        return [Replaced(order.client_order_id, now)]
 
 
 def oms() -> tuple[OrderManager, FakeVenue]:

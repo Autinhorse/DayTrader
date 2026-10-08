@@ -21,9 +21,9 @@ from decimal import ROUND_HALF_UP, Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from trader.core.models import Bar, CommissionUpdate, Fill, Order
+from trader.core.models import Bar, CommissionUpdate, Fill, Order, OrderIntent
 from trader.core.timeutil import NS_PER_SEC
-from trader.oms.orders import Accepted, BrokerUpdate, Cancelled, Expired, Rejected
+from trader.oms.orders import Accepted, BrokerUpdate, Cancelled, Expired, Rejected, Replaced
 
 PRICE_Q = Decimal("0.0001")
 CENT = Decimal("0.01")
@@ -116,12 +116,16 @@ class SimBroker:
             return []
         return [Cancelled(client_order_id, now), *self._final_commission(w)]
 
-    def modify(self, order: Order, effective: int) -> None:
-        """改单：订单对象已带新的 intent；生效时间重新计算，排队顺序排到最后。"""
+    def modify(
+        self, order: Order, new_intent: OrderIntent, effective: int, now: int
+    ) -> list[BrokerUpdate]:
+        """改单：立即确认（Replaced 回报把新内容写进订单）；生效时间重新计算，排队顺序排到最后。"""
         w = self._working.get(order.client_order_id)
-        if w is not None:
-            self._seq += 1
-            w.order, w.effective, w.seq, w.triggered_at = order, effective, self._seq, None
+        if w is None:
+            return [Rejected(order.client_order_id, now, "sim", "订单已不在挂单中")]
+        self._seq += 1
+        w.order, w.effective, w.seq, w.triggered_at = order, effective, self._seq, None
+        return [Replaced(order.client_order_id, now)]
 
     def expire(self, now: int, outside_rth_too: bool) -> list[BrokerUpdate]:
         """DAY 订单过期：常规收盘时过期普通订单，盘后结束时也过期 outside_rth 订单。"""
@@ -320,5 +324,6 @@ class SimBroker:
         """部分成交后被撤销或过期：补足这张订单的最低收费。"""
         extra = self._min_topup(w)
         if extra > 0 and w.last_exec is not None:
-            return [CommissionUpdate(w.last_exec, extra)]  # type: ignore[list-item]
+            # 最低收费补足用单独的编号，避免被当成同一笔成交的重复手续费回报
+            return [CommissionUpdate(f"{w.last_exec}:min", extra)]  # type: ignore[list-item]
         return []

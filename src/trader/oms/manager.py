@@ -4,14 +4,22 @@
 子单数量始终等于"入场单累计成交量 − 已成交的退出量"，一张退出单成交后另一张随之缩减或撤销，
 不会超量卖出形成反向持仓。入场单撤销时没有成交的部分不生成子单。
 
-阶段 3 只实现常规路径；实盘的落盘顺序和恢复在阶段 6。
+实盘相关（阶段 6）：
+- **发件箱**：deferred=True 时，下单、撤单、改单请求先进入 outbox，
+  由引擎在落盘提交后调用 flush() 发出；回测和回放 deferred=False，立即发出。
+- **确定性订单号**：id_provider 由引擎设置为“输入事件编号-序号”，崩溃恢复后重新处理同一事件，
+  生成的订单号相同，已存在的订单不会重复创建（幂等）。
+- **收盘前平仓**：撤单请求发出后，等到该标的没有任何未终结订单（撤单确认或成交）
+  才按实际持仓发平仓单。
+- 回报中的异常（迟到成交、无法识别的状态、未知订单的回报）通过 on_system 报告，
+  不抛错。
 """
 
 from __future__ import annotations
 
 import copy
 import dataclasses
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Protocol
@@ -24,15 +32,27 @@ from trader.core.models import (
     OrderStatus,
     Reason,
 )
-from trader.oms.orders import BrokerUpdate, Rejected, reduce
+from trader.oms.orders import (
+    BrokerUpdate,
+    CancelRequested,
+    LocalUpdate,
+    Rejected,
+    ReplaceRequested,
+    reduce,
+    reduce_commission,
+)
 from trader.oms.portfolio import Portfolio
 from trader.oms.risk import Reject, RiskLimits, RiskView, check, signature
 
 
 class ExecutionVenue(Protocol):
+    """执行器：返回立即可知的回报（模拟撮合同步返回；IBKR 执行器返回空列表，回报异步到达）。"""
+
     def submit(self, order: Order, effective: int, now: int) -> list[BrokerUpdate]: ...
     def cancel(self, client_order_id: str, now: int) -> list[BrokerUpdate]: ...
-    def modify(self, order: Order, effective: int) -> None: ...
+    def modify(
+        self, order: Order, new_intent: OrderIntent, effective: int, now: int
+    ) -> list[BrokerUpdate]: ...
 
 
 @dataclass(slots=True)
@@ -74,6 +94,12 @@ class OrderManager:
     _recent: dict[str, list[int]] = field(default_factory=dict)
     _signatures: dict[str, list[tuple[int, tuple]]] = field(default_factory=dict)
     on_notice: Callable[[Notice], None] | None = None
+    on_system: Callable[[int, str, str], None] | None = None  # (时间, 订单号或标的, 说明)
+    deferred: bool = False
+    outbox: list[tuple[str, Order, OrderIntent | None, int]] = field(default_factory=list)
+    id_provider: Callable[[str], str] | None = None
+    _flatten_pending: dict[str, tuple[str, bool]] = field(default_factory=dict)
+    _notes_seen: dict[str, int] = field(default_factory=dict)
 
     # ---------- 标的归属（DESIGN.md 7.4） ----------
 
@@ -136,6 +162,8 @@ class OrderManager:
     # ---------- 下单、撤单、改单 ----------
 
     def _new_id(self, source: str) -> str:
+        if self.id_provider is not None:
+            return self.id_provider(source)
         self._seq += 1
         return f"{source}-{self._seq:06d}"
 
@@ -148,7 +176,11 @@ class OrderManager:
         parent_id: str | None = None,
         role: str = "single",
     ) -> Order:
-        order = Order(intent=intent, client_order_id=self._new_id(intent.source), created_at=now)
+        coid = self._new_id(intent.source)
+        existing = self.orders.get(coid)
+        if existing is not None:  # 崩溃恢复后重新处理同一个输入事件：不重复下单
+            return existing
+        order = Order(intent=intent, client_order_id=coid, created_at=now)
         order.status_times[OrderStatus.NEW] = now
         order.parent_id, order.role = parent_id, role
         if parent_id:
@@ -167,9 +199,37 @@ class OrderManager:
         order.status = OrderStatus.SUBMITTED
         order.status_times[OrderStatus.SUBMITTED] = now
         self._notify(Notice("order", order))
-        for u in self.venue.submit(order, now + self.decision_delay_ns, now):
-            self._apply(u)
+        self._send("submit", order, None, now)
         return order
+
+    # ---------- 发件箱 ----------
+
+    def _send(self, action: str, order: Order, intent: OrderIntent | None, now: int) -> None:
+        if self.deferred:
+            self.outbox.append((action, order, intent, now))
+        else:
+            self._dispatch(action, order, intent, now)
+
+    def _dispatch(self, action: str, order: Order, intent: OrderIntent | None, now: int) -> None:
+        coid = order.client_order_id
+        if action == "submit":
+            updates = self.venue.submit(order, now + self.decision_delay_ns, now)
+        elif action == "cancel":
+            updates = self.venue.cancel(coid, now)
+        else:
+            assert intent is not None
+            updates = self.venue.modify(order, intent, now + self.decision_delay_ns, now)
+        for u in updates:
+            self._apply(u)
+
+    def flush(self) -> int:
+        """发出发件箱里的请求（引擎在落盘提交之后调用），返回发出的条数。"""
+        n = 0
+        while self.outbox:
+            action, order, intent, now = self.outbox.pop(0)
+            self._dispatch(action, order, intent, now)
+            n += 1
+        return n
 
     def _trim(self, source: str, now: int) -> None:
         horizon = now - 60 * 10**9
@@ -178,10 +238,10 @@ class OrderManager:
 
     def cancel(self, client_order_id: str, now: int) -> None:
         order = self.orders.get(client_order_id)
-        if order is None or order.status.is_terminal:
+        if order is None or order.status.is_terminal or order.status == OrderStatus.PENDING_CANCEL:
             return
-        for u in self.venue.cancel(client_order_id, now):
-            self._apply(u)
+        self._apply(CancelRequested(client_order_id, now))
+        self._send("cancel", order, None, now)
 
     def modify(
         self,
@@ -216,42 +276,65 @@ class OrderManager:
         )
         if rej is not None:
             return rej
-        order.intent = new_intent
-        self.venue.modify(order, now + self.decision_delay_ns)
-        self._notify(Notice("order", order))
+        self._apply(ReplaceRequested(client_order_id, now, new_intent))
+        self._send("modify", order, new_intent, now)
         return None
 
     # ---------- 回报处理 ----------
 
-    def handle(self, updates: list[BrokerUpdate]) -> None:
+    def handle(self, updates: Sequence[BrokerUpdate | LocalUpdate | CommissionUpdate]) -> None:
         for u in updates:
             self._apply(u)
 
-    def _apply(self, u: BrokerUpdate | CommissionUpdate) -> None:
+    def _apply(self, u: BrokerUpdate | LocalUpdate | CommissionUpdate) -> None:
         if isinstance(u, CommissionUpdate):
-            coid = self.exec_to_order.get(u.broker_exec_id)
-            if coid is not None:
-                self.orders[coid].commission += u.commission
-                self.exec_commission[u.broker_exec_id] = (
-                    self.exec_commission.get(u.broker_exec_id, Decimal(0)) + u.commission
-                )
-                self.portfolio.apply_commission(u.commission)
+            base = u.broker_exec_id.split(":")[0]  # “:min” 是同一笔成交的最低收费补足
+            coid = self.exec_to_order.get(base)
+            if coid is None:
+                self._system(0, base, f"收到未知成交的手续费 {u.commission}")
+                return
+            added = reduce_commission(self.orders[coid], u)
+            if added:
+                self.exec_commission[base] = self.exec_commission.get(base, Decimal(0)) + added
+                self.portfolio.apply_commission(added)
             return
         order = self.orders.get(u.client_order_id)
         if order is None:
+            self._system(u.ts, u.client_order_id, f"收到未知订单的回报：{type(u).__name__}")
             return
         if isinstance(u, Fill) and u.broker_exec_id in self.exec_to_order:
             return  # 重复的成交回报
         before = (order.status, order.filled_qty)
+        old_fill = None
+        if isinstance(u, Fill) and u.corrects is not None:
+            old_fill = next(
+                (f for f in order.fills.values() if f.broker_exec_id == u.corrects), None
+            )
         reduce(order, u)
         if isinstance(u, Fill):
             self.exec_to_order[u.broker_exec_id] = order.client_order_id
             self.fills.append(u)
-            self.portfolio.apply_fill(order.intent.symbol, order.intent.side, u.qty, u.price)
+            sym, side = order.intent.symbol, order.intent.side
+            if old_fill is not None:  # 成交更正：冲回原成交，再按新版本入账
+                undo = "SELL" if side == "BUY" else "BUY"
+                self.portfolio.apply_fill(sym, undo, old_fill.qty, old_fill.price)  # type: ignore[arg-type]
+            self.portfolio.apply_fill(sym, side, u.qty, u.price)
             self._notify(Notice("fill", order, u))
         if (order.status, order.filled_qty) != before:
             self._notify(Notice("order", order))
+        self._report_notes(order, u.ts)
         self._after_change(order, u.ts)
+        self._check_flatten(u.ts)
+
+    def _report_notes(self, order: Order, ts: int) -> None:
+        seen = self._notes_seen.get(order.client_order_id, 0)
+        for note in order.notes[seen:]:
+            self._system(ts, order.client_order_id, note)
+        self._notes_seen[order.client_order_id] = len(order.notes)
+
+    def _system(self, ts: int, ref: str, msg: str) -> None:
+        if self.on_system is not None:
+            self.on_system(ts, ref, msg)
 
     def _notify(self, n: Notice) -> None:
         if self.on_notice is not None:
@@ -281,8 +364,11 @@ class OrderManager:
             self._create_children(parent, target, now)
             return
         for c in active:
+            if c.status == OrderStatus.PENDING_CANCEL:
+                continue
             want = c.filled_qty + target
-            if want != c.intent.qty:
+            asked = (c.pending_intent or c.intent).qty  # 改单请求已发出时按请求的新数量比较
+            if want != asked:
                 self.modify(c.client_order_id, now, qty=want)
 
     def _create_children(self, parent: Order, qty: int, now: int) -> None:
@@ -323,15 +409,31 @@ class OrderManager:
     def flatten(
         self, now: int, symbols: list[str], code: str = "eod_flatten", outside_rth: bool = False
     ) -> None:
-        """停止新开仓 → 撤销全部挂单 → 按撤单确认后的实际持仓发平仓单。
+        """停止新开仓 → 撤销全部挂单 → 等撤单确认 → 按实际持仓发平仓单。
 
         常规时段内用市价单；盘后（outside_rth）只能用限价单，按最新价让价 1% 的可成交限价。
+        不等撤单确认就平仓，括号单的子单可能同时成交，把持仓打成反向（DESIGN.md 8.4）。
         """
         self.session.flattening = True
+        for sym in symbols:
+            self._flatten_pending[sym] = (code, outside_rth)
         for o in self.open_orders():
             if o.intent.symbol in symbols:
                 self.cancel(o.client_order_id, now)
-        for sym in symbols:
+        self._check_flatten(now)
+
+    def flatten_pending(self) -> list[str]:
+        """已请求平仓、还在等撤单确认的标的。"""
+        return list(self._flatten_pending)
+
+    def _check_flatten(self, now: int) -> None:
+        for sym in list(self._flatten_pending):
+            if any(
+                o.intent.symbol == sym and o.intent.reason.code != self._flatten_pending[sym][0]
+                for o in self.open_orders()
+            ):
+                continue  # 还有撤单未确认
+            code, outside_rth = self._flatten_pending.pop(sym)
             pos = self.portfolio.position(sym)
             if pos.qty == 0:
                 continue

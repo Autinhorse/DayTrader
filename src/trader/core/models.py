@@ -160,13 +160,17 @@ class OrderIntent:
 
 @dataclass(frozen=True, slots=True)
 class Fill:
-    """成交事实，按 broker_exec_id 去重。"""
+    """成交事实，按 broker_exec_id 去重。
+
+    corrects 非空表示这是对另一笔成交（其 broker_exec_id）的更正：保留原记录，以新版本为准。
+    """
 
     client_order_id: str
     ts: int
     price: Decimal
     qty: int
     broker_exec_id: str
+    corrects: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,6 +232,14 @@ class Order:
     role: str = "single"  # single / entry / take_profit / stop_loss
     reject_rule: str | None = None  # 被风控或执行器拒绝的规则
     reject_detail: str = ""
+    # 每笔成交的当前版本（键为最初的 broker_exec_id；更正后指向新版本），用于重算成交量和均价
+    fills: dict[str, Fill] = field(default_factory=dict)
+    commission_execs: set[str] = field(default_factory=set)  # 已收到手续费的成交
+    broker_status: str | None = None  # 券商原始状态，原样保留
+    pending_intent: OrderIntent | None = None  # 改单请求已发出、尚未确认的新内容
+    notes: list[str] = field(
+        default_factory=list
+    )  # 异常情况（迟到成交、超量成交、无法识别的状态等）
 
     @property
     def remaining_qty(self) -> int:

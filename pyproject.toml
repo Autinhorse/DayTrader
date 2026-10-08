@@ -1,6 +1,6 @@
 [project]
 name = "trader"
-version = "0.0.10"
+version = "0.0.11"
 description = "个人美股日内交易系统：研究版与实盘版共用一份核心代码"
 requires-python = ">=3.12"
 # core 依赖组：两个应用都需要

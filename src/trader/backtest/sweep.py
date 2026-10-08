@@ -146,23 +146,32 @@ def run_sweep(
         for _, sample, cfg in jobs
     ]
     done = 0
-    with ProcessPoolExecutor(max_workers=workers) as pool:
-        futs = {
-            pool.submit(_run_one, a): (k, jobs[i][1])
-            for i, (a, k) in enumerate(zip(args, keys, strict=True))
-        }
-        for fut in as_completed(futs):
-            key, sample = futs[fut]
-            run_id, _path, summary = fut.result()
-            prefix = {"in": "in_", "out": "out_", "": ""}[sample]
-            row = rows[key]
-            row[f"{prefix}run_id"] = run_id
-            for col, path in SUMMARY_COLUMNS:
-                v = metric(summary, path)
-                row[f"{prefix}{col}"] = float(v) if v is not None else None
-            done += 1
-            if progress:
-                progress(done, len(jobs), run_id)
+
+    def record(key: str, sample: str, result: tuple[str, str, dict[str, Any]]) -> None:
+        nonlocal done
+        run_id, _path, summary = result
+        prefix = {"in": "in_", "out": "out_", "": ""}[sample]
+        row = rows[key]
+        row[f"{prefix}run_id"] = run_id
+        for col, path in SUMMARY_COLUMNS:
+            v = metric(summary, path)
+            row[f"{prefix}{col}"] = float(v) if v is not None else None
+        done += 1
+        if progress:
+            progress(done, len(jobs), run_id)
+
+    if workers == 1:  # 单进程：顺序执行，省去启动子进程的开销
+        for i, (a, k) in enumerate(zip(args, keys, strict=True)):
+            record(k, jobs[i][1], _run_one(a))
+    else:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            futs = {
+                pool.submit(_run_one, a): (k, jobs[i][1])
+                for i, (a, k) in enumerate(zip(args, keys, strict=True))
+            }
+            for fut in as_completed(futs):
+                key, sample = futs[fut]
+                record(key, sample, fut.result())
     table = pl.DataFrame(list(rows.values()), infer_schema_length=None)
     sort_col = "in_net_pnl" if split is not None else "net_pnl"
     if sort_col in table.columns:

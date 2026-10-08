@@ -11,6 +11,10 @@
   let bridge = null;
   let mode = "price";
   let seriesInfo = []; // {series, label, key}
+  let volSeries = null;
+  let indSeries = []; // indSeries[i][key] = series，用于回放时增量更新
+  let markerPlugin = null;
+  let markerList = [];
   let loadingMore = false;
   const palette = ["#2962ff", "#ff9800", "#e91e63", "#00bcd4", "#9c27b0", "#8bc34a", "#ffeb3b", "#795548"];
 
@@ -37,6 +41,10 @@
     chart = LWC.createChart(el, baseOptions());
     candle = null;
     seriesInfo = [];
+    volSeries = null;
+    indSeries = [];
+    markerPlugin = null;
+    markerList = [];
     chart.subscribeCrosshairMove(onCrosshair);
     chart.timeScale().subscribeVisibleLogicalRangeChange(onRange);
   }
@@ -100,6 +108,7 @@
           priceFormat: { type: "volume" }, priceLineVisible: false, lastValueVisible: false,
         }, pane);
         vol.setData(p.volume);
+        volSeries = vol;
         seriesInfo.push({ series: vol, label: "量" });
         pane += 1;
       }
@@ -107,6 +116,8 @@
       const markers = (p.markers || []).slice();
       for (const ind of p.indicators || []) {
         let indPane = null;
+        const refs = {};
+        indSeries.push(refs);
         for (const o of ind.outputs) {
           const color = o.color || palette[ci++ % palette.length];
           const label = ind.outputs.length > 1 ? `${ind.label}.${o.key}` : ind.label;
@@ -125,11 +136,13 @@
                                                      lastValueVisible: false }, target)
             : chart.addSeries(LWC.LineSeries, lineOpts(o, color), target);
           s.setData(o.data);
+          refs[o.key] = s;
           seriesInfo.push({ series: s, label: label });
         }
       }
       markers.sort((a, b) => a.time - b.time);
-      LWC.createSeriesMarkers(candle, markers);
+      markerList = markers;
+      markerPlugin = LWC.createSeriesMarkers(candle, markers);
       // 主图占大部分高度，成交量和副图按比例分配，窗口变矮时 K 线也看得清
       const panes = chart.panes();
       panes[0].setStretchFactor(panes.length > 2 ? 3 : 4);
@@ -143,6 +156,24 @@
         chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - 200), to: n + 5 });
       }
       setTimeout(function () { loadingMore = false; }, 300);
+    },
+
+    // 回放增量更新：candles/volume 按时间追加或替换最后一根（形成中的 bar 用同一时间反复更新）；
+    // indicators: [{i, key, data}]；markers 为新增的标记。follow 为真时视图跟随最新一根。
+    update: function (u) {
+      if (!candle) return;
+      for (const c of u.candles || []) candle.update(c);
+      if (volSeries) for (const v of u.volume || []) volSeries.update(v);
+      for (const it of u.indicators || []) {
+        const s = indSeries[it.i] && indSeries[it.i][it.key];
+        if (s) for (const d of it.data) s.update(d);
+      }
+      if (u.markers && u.markers.length && markerPlugin) {
+        markerList = markerList.concat(u.markers).sort((a, b) => a.time - b.time);
+        markerPlugin.setMarkers(markerList);
+      }
+      if (u.candles && u.candles.length) empty.style.display = "none";
+      if (u.follow) chart.timeScale().scrollToRealTime();
     },
 
     // 没有更早的数据了

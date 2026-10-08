@@ -163,7 +163,7 @@ class Services:
                     if vv is not None
                 ]
                 if cls.scope == "session":
-                    _break_between_days(data, step=o_spec.plot == "hline")
+                    break_between_days(data, step=o_spec.plot == "hline")
                 color = (spec.color if i == 0 and spec.color else None) or o_spec.color
                 outs.append(
                     {
@@ -203,7 +203,7 @@ class Services:
         return out
 
 
-def _break_between_days(
+def break_between_days(
     data: list[dict[str, Any]], step: bool = False, gap_s: int = 3 * 3600
 ) -> None:
     """会话指标每天重新开始：跨夜的那一段线画成透明，避免看起来像价格跳变。

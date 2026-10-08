@@ -15,6 +15,7 @@ from typing import Any
 
 from PySide6.QtCore import QByteArray, QSettings, Qt, QTimer
 from PySide6.QtGui import QAction, QCloseEvent
+from PySide6.QtNetwork import QLocalServer
 from PySide6.QtWidgets import (
     QDockWidget,
     QLabel,
@@ -29,6 +30,8 @@ from trader.gui.backtest_panel import BacktestPanel
 from trader.gui.chart import ChartWidget
 from trader.gui.data_panel import DataPanel
 from trader.gui.experiments_panel import CompareWindow, ExperimentsPanel, show_sweep
+from trader.gui.ipc import IPC_NAME
+from trader.gui.replay_panel import ReplayPanel
 from trader.gui.results import ResultsPanel
 from trader.gui.services import Services
 
@@ -75,6 +78,7 @@ class MainWindow(QMainWindow):
         self.results = ResultsPanel()
         self.experiments = ExperimentsPanel(self.sv)
         self.data = DataPanel(project_dir)
+        self.replay = ReplayPanel(self.sv)
         self.d_backtest = self._dock(
             "backtest", "回测", self.backtest, Qt.DockWidgetArea.LeftDockWidgetArea
         )
@@ -87,9 +91,15 @@ class MainWindow(QMainWindow):
         self.d_data = self._dock(
             "data", "数据管理", self.data, Qt.DockWidgetArea.BottomDockWidgetArea
         )
+        self.d_replay = self._dock(
+            "replay", "回放", self.replay, Qt.DockWidgetArea.BottomDockWidgetArea
+        )
         self.tabifyDockWidget(self.d_results, self.d_experiments)
         self.tabifyDockWidget(self.d_experiments, self.d_data)
+        self.tabifyDockWidget(self.d_data, self.d_replay)
         self.d_results.raise_()
+        self.replay_charts: dict[str, QDockWidget] = {}
+        self.replay.session_changed.connect(self._replay_loaded)
 
         self.backtest.finished.connect(self._backtest_done)
         self.results.trade_selected.connect(self._show_trade)
@@ -99,6 +109,7 @@ class MainWindow(QMainWindow):
 
         self._menus()
         self._restore()
+        self._start_ipc()
         self._first_show = self.settings.value("state") is None
         if self.sv.load_errors:
             QMessageBox.warning(
@@ -140,14 +151,41 @@ class MainWindow(QMainWindow):
         self.charts[name] = (d, w)
         return w
 
+    def new_replay_chart(self, config: dict[str, Any] | None = None) -> None:
+        """回放图表：数据截止到回放时钟。可以开多个（例如同一标的的 1 分钟和 5 分钟）。"""
+        n = 1
+        while f"replay_chart_{n}" in self.replay_charts:
+            n += 1
+        name = f"replay_chart_{n}"
+        w = self.replay.new_chart(config)
+        d = self._dock(name, w.title(), w, Qt.DockWidgetArea.RightDockWidgetArea)
+        w.title_changed.connect(lambda t, dock=d: dock.setWindowTitle(t))
+        d.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        d.destroyed.connect(lambda _o=None, k=name: self.replay_charts.pop(k, None))
+        self.replay_charts[name] = d
+        charts = [dk for dk, _ in self.charts.values() if not dk.isFloating()]
+        if charts:
+            self.tabifyDockWidget(charts[0], d)
+        d.show()
+        d.raise_()
+
+    def _replay_loaded(self) -> None:
+        if not self.replay_charts:
+            self.new_replay_chart()
+        for d in self.replay_charts.values():
+            d.raise_()
+
     def _menus(self) -> None:
         win = self.menuBar().addMenu("窗口")
         a = QAction("新建图表", self)
         a.setShortcut("Ctrl+N")
         a.triggered.connect(lambda: self.new_chart())
         win.addAction(a)
+        ra = QAction("新建回放图表", self)
+        ra.triggered.connect(lambda: self.new_replay_chart())
+        win.addAction(ra)
         win.addSeparator()
-        for d in (self.d_backtest, self.d_results, self.d_experiments, self.d_data):
+        for d in (self.d_backtest, self.d_results, self.d_experiments, self.d_data, self.d_replay):
             win.addAction(d.toggleViewAction())
         lay = self.menuBar().addMenu("布局")
         reset = QAction("恢复默认布局", self)
@@ -159,7 +197,7 @@ class MainWindow(QMainWindow):
         code.addAction(reload_)
 
     def _default_layout(self) -> None:
-        for d in (self.d_backtest, self.d_results, self.d_experiments, self.d_data):
+        for d in (self.d_backtest, self.d_results, self.d_experiments, self.d_data, self.d_replay):
             d.setFloating(False)
             d.show()
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.d_backtest)
@@ -167,6 +205,7 @@ class MainWindow(QMainWindow):
             self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, d)
         self.tabifyDockWidget(self.d_results, self.d_experiments)
         self.tabifyDockWidget(self.d_experiments, self.d_data)
+        self.tabifyDockWidget(self.d_data, self.d_replay)
         for dk, _ in self.charts.values():
             dk.setFloating(False)
             self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dk)
@@ -238,6 +277,29 @@ class MainWindow(QMainWindow):
         self.d_backtest.show()
         self.d_backtest.raise_()
 
+    # ---------- notebook 打开回测（res.open_in_ui） ----------
+
+    def _start_ipc(self) -> None:
+        QLocalServer.removeServer(IPC_NAME)
+        self.ipc = QLocalServer(self)
+        self.ipc.newConnection.connect(self._ipc_connection)
+        self.ipc.listen(IPC_NAME)
+
+    def _ipc_connection(self) -> None:
+        sock = self.ipc.nextPendingConnection()
+        if sock is None:
+            return
+
+        def read() -> None:
+            while sock.canReadLine():
+                path = bytes(sock.readLine().data()).decode("utf-8").strip()
+                if path:
+                    self.open_run(path)
+                    self.raise_()
+                    self.activateWindow()
+
+        sock.readyRead.connect(read)
+
     # ---------- 布局保存与恢复 ----------
 
     def _restore(self) -> None:
@@ -263,6 +325,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         self.save_layout()
         self.backtest.cancel()
+        self.replay.pause()
         for w in self._windows:
             w.close()
         super().closeEvent(event)

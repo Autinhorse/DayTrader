@@ -38,6 +38,9 @@ uv run trader backtest list
 界面：PySide6 桌面程序（决策 0005），`trader.gui`；图表是 QWebEngineView 里的 Lightweight Charts
 （`src/trader/gui/assets/`）。回测与参数扫描在子进程 `python -m trader.backtest.worker` 里运行。
 界面改动后用 QWidget.grab() 截图检查外观（测试只覆盖逻辑）。
+回放：`trader.backtest.replay.ReplaySession` 驱动同一个引擎（start / advance / finish），界面在“回放”面板；
+查询一律截止到回放时钟。notebook：`from trader.research import load_bars, compute_indicator, run_backtest,
+load_run, sweep`，示例 `user/notebooks/`。见 docs/decisions/0006。
 
 数据：`data/bars/1s/symbol=X/date=Y.parquet`（原始价格）、`data/catalog.sqlite`、`data/corporate_actions.parquet`、
 `data/live/<日期>/`（IBKR 录制）。Massive key 在 `.env` 的 `MASSIVE_API_KEY`（旧的 `config.json` 也认）。

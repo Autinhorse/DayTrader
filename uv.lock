@@ -1419,7 +1419,7 @@ wheels = [
 
 [[package]]
 name = "trader"
-version = "0.0.7"
+version = "0.0.8"
 source = { editable = "." }
 default-groups = ["dev", "tools"]
 dependencies = [
@@ -1431,6 +1431,8 @@ dependencies = [
 
 [package.optional-dependencies]
 research = [
+    { name = "pandas" },
+    { name = "pyarrow" },
     { name = "pyside6" },
     { name = "requests" },
 ]
@@ -1447,15 +1449,15 @@ dev = [
 tools = [
     { name = "ib-async" },
     { name = "ipykernel" },
-    { name = "pandas" },
-    { name = "pyarrow" },
     { name = "trader", extra = ["research"] },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "exchange-calendars" },
+    { name = "pandas", marker = "extra == 'research'" },
     { name = "polars" },
+    { name = "pyarrow", marker = "extra == 'research'" },
     { name = "pydantic" },
     { name = "pyside6", marker = "extra == 'research'" },
     { name = "pyyaml" },
@@ -1475,8 +1477,6 @@ dev = [
 tools = [
     { name = "ib-async" },
     { name = "ipykernel" },
-    { name = "pandas" },
-    { name = "pyarrow" },
     { name = "trader", extras = ["research"] },
 ]
 

@@ -72,4 +72,4 @@ class HistoricalBarFeed:
         df = df.filter((df["ts_start"] >= lo) & (df["ts_start"] < hi))
         for ts, te, o, h, low, c, v, vw, n, sess in df.iter_rows():
             # 延迟对所有 bar 相同，排序键用 ts_end 代替可用时间
-            yield te, rank, Bar(symbol, "1s", ts, o, h, low, c, v, vw, n, sess)
+            yield te, rank, Bar(symbol, "1s", ts, o, h, low, c, v, vw, n, sess, te)

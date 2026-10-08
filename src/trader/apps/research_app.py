@@ -25,6 +25,10 @@ def main() -> int:
     app.setFont(QFont("Microsoft YaHei UI", 9))
     w = MainWindow(project_dir(), data_dir())
     w.show()
+    if "--open" in sys.argv:  # notebook 的 res.open_in_ui()：启动后打开指定回测
+        i = sys.argv.index("--open")
+        if i + 1 < len(sys.argv):
+            w.open_run(sys.argv[i + 1])
     return app.exec()
 
 

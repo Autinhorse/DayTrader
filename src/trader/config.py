@@ -39,8 +39,16 @@ class Universe(BaseModel):
 
 
 def project_dir() -> Path:
-    """项目根目录：环境变量 TRADER_HOME，否则当前目录。"""
-    return Path(os.environ.get("TRADER_HOME") or Path.cwd())
+    """项目根目录：环境变量 TRADER_HOME；否则从当前目录向上找有 config/universe.yaml 的目录
+    （notebook 放在项目里任何位置都能用）；都找不到就用当前目录。"""
+    env = os.environ.get("TRADER_HOME")
+    if env:
+        return Path(env)
+    cwd = Path.cwd()
+    for d in (cwd, *cwd.parents):
+        if (d / "config" / "universe.yaml").exists():
+            return d
+    return cwd
 
 
 def data_dir() -> Path:

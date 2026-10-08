@@ -94,3 +94,26 @@ def test_sweep(project):
     assert isinstance(table, pd.DataFrame) and len(table) == 2
     assert set(table["param_qty"]) == {"5", "10"}
     assert {"in_net_pnl", "out_net_pnl", "in_run_id", "out_run_id"} <= set(table.columns)
+
+
+def test_project_dir_found_from_subdirectory(tmp_path, monkeypatch):
+    """notebook 放在项目子目录里：向上找到有 config/universe.yaml 的项目根目录。"""
+    from trader.config import project_dir
+
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "universe.yaml").write_text("symbols: [SPY]\n", encoding="utf-8")
+    sub = tmp_path / "user" / "notebooks"
+    sub.mkdir(parents=True)
+    monkeypatch.delenv("TRADER_HOME", raising=False)
+    monkeypatch.chdir(sub)
+    assert project_dir() == tmp_path
+
+
+def test_strategy_defined_without_source_file_can_run():
+    """在 notebook 单元格里定义的策略拿不到源文件：源码哈希记为不可用，回测照常运行。"""
+    from trader.backtest.runner import _source_hash
+
+    ns: dict = {}
+    exec("class X:\n    pass\n", ns)  # noqa: S102
+    assert _source_hash(ns["X"]) == "unavailable"
+    assert len(_source_hash(type(pytest))) == 16

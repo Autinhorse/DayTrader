@@ -7,7 +7,9 @@
 ## 常用命令
 
 ```bat
-uv run trader-research  :: 研究版桌面程序（图表、回测、结果、实验对比、参数扫描、数据管理）
+run_research.bat        :: 双击打开研究版桌面程序（= uv run trader-research）
+run_jupyter.bat         :: 双击打开 JupyterLab（user/notebooks）
+uv run trader-research  :: 研究版桌面程序（图表、回测、结果、实验对比、参数扫描、回放、数据管理）
 uv sync                 :: 安装/同步依赖（新增依赖前先说明理由）
 check.bat               :: 全部质量检查：ruff、ruff format、pyright、pytest、lint-imports
 uv run pytest           :: 只跑测试
@@ -41,6 +43,7 @@ uv run trader backtest list
 回放：`trader.backtest.replay.ReplaySession` 驱动同一个引擎（start / advance / finish），界面在“回放”面板；
 查询一律截止到回放时钟。notebook：`from trader.research import load_bars, compute_indicator, run_backtest,
 load_run, sweep`，示例 `user/notebooks/`。见 docs/decisions/0006。
+给用户的扩展说明（新指标、新策略、新图表）：docs/扩展指南.md。
 
 数据：`data/bars/1s/symbol=X/date=Y.parquet`（原始价格）、`data/catalog.sqlite`、`data/corporate_actions.parquet`、
 `data/live/<日期>/`（IBKR 录制）。Massive key 在 `.env` 的 `MASSIVE_API_KEY`（旧的 `config.json` 也认）。

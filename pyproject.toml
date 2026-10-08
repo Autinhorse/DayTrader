@@ -1,6 +1,6 @@
 [project]
 name = "trader"
-version = "0.0.8"
+version = "0.0.9"
 description = "个人美股日内交易系统：研究版与实盘版共用一份核心代码"
 requires-python = ">=3.12"
 # core 依赖组：两个应用都需要
@@ -18,6 +18,7 @@ research = [
     "PySide6",  # 桌面界面（决策 0005）
     "pandas",  # notebook 接口的返回值
     "pyarrow",  # polars 转 pandas
+    "jupyterlab",  # notebook 环境（用户 2026-10-09 确认安装）
 ]
 # 只属于实盘版，尽量不加
 live = []

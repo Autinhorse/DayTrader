@@ -116,4 +116,6 @@ def test_strategy_defined_without_source_file_can_run():
     ns: dict = {}
     exec("class X:\n    pass\n", ns)  # noqa: S102
     assert _source_hash(ns["X"]) == "unavailable"
-    assert len(_source_hash(type(pytest))) == 16
+    from trader.strategy.base import StrategyState  # 定义在源文件里的类
+
+    assert len(_source_hash(StrategyState)) == 16

@@ -65,6 +65,14 @@ class LiveConfig(BaseModel):
     sim: SimConfig = Field(default_factory=lambda: SimConfig())
     risk: RiskLimits
     max_clock_skew_ms: int = Field(default=2000, ge=0, description="本机与 IB 服务器时间偏差上限")
+    control_host: str = Field(default="127.0.0.1", description="界面连接的地址，只允许本机")
+    control_port: int = Field(default=0, ge=0, description="界面连接的端口；0 = 按运行方式取默认值")
+
+    @property
+    def ui_port(self) -> int:
+        return self.control_port or {"local_paper": 8764, "broker_paper": 8765}.get(
+            self.profile, 8766
+        )
 
     @model_validator(mode="after")
     def _check(self) -> LiveConfig:

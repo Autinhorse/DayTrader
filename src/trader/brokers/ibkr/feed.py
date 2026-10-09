@@ -102,6 +102,9 @@ class IbkrFeed:
     _files: dict[str, IO[str]] = field(default_factory=dict)
     connected: bool = False
     revisions: int = 0
+    _hist_timeouts: int = 0
+    _hist_down: bool = False
+    _skipped: list[str] = field(default_factory=list)
 
     # ---------- 能力 ----------
 
@@ -127,6 +130,8 @@ class IbkrFeed:
         await asyncio.sleep(self.settings.settle_s)
         for s in todo:
             await self._backfill(s)
+        if self._skipped:
+            self._sys(SystemKind.FEED_INTERRUPTED, f"跳过补数、当天数据有缺口：{self._skipped}")
         return self.drain_system()
 
     async def add_symbol(self, symbol: str) -> None:
@@ -168,13 +173,32 @@ class IbkrFeed:
         day = loc[0]
         fine: list[HistBar] = []
         coarse: list[HistBar] = []
+        elapsed_s = (boundary - day.start) // NS_PER_SEC
+        if elapsed_s <= 0:
+            return
+        if self._hist_down:  # IB 历史数据服务已连续超时：不再等，记为缺口
+            st.gap = True
+            self._skipped.append(symbol)
+            return
         try:
-            fine = await self.api.historical_bars(
-                symbol, f"{self.settings.fine_backfill_s} S", "1 secs"
-            )
+            # 请求的时长不超过当天已经过去的时间（刚开盘时只要几分钟）
+            secs = min(self.settings.fine_backfill_s, elapsed_s + 60)
+            fine = await self.api.historical_bars(symbol, f"{secs} S", "1 secs")
             await asyncio.sleep(self.settings.request_gap_s)
-            coarse = await self.api.historical_bars(symbol, "1 D", "1 min")
-            await asyncio.sleep(self.settings.request_gap_s)
+            if elapsed_s > secs - 60:
+                coarse = await self.api.historical_bars(symbol, "1 D", "1 min")
+                await asyncio.sleep(self.settings.request_gap_s)
+            self._hist_timeouts = 0
+        except TimeoutError:
+            st.gap = True
+            self._hist_timeouts += 1
+            if self._hist_timeouts >= 2:
+                self._hist_down = True
+                self._sys(
+                    SystemKind.FEED_INTERRUPTED,
+                    "IB 历史数据服务连续超时，其余标的跳过补数（当天数据有缺口）",
+                )
+            self._sys(SystemKind.FEED_INTERRUPTED, "补数超时，当天数据有缺口", symbol)
         except Exception as exc:  # noqa: BLE001 - IB 的各种错误都按补数失败处理
             st.gap = True
             self._sys(SystemKind.FEED_INTERRUPTED, f"补数失败：{exc}，当天数据有缺口", symbol)

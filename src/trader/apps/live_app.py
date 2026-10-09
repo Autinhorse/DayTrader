@@ -3,6 +3,7 @@
     uv run trader-live --profile local_paper                    # 实时行情 + 本地模拟成交
     uv run trader-live --profile local_paper --start-strategy   # 同时开启配置里的策略
     uv run trader-live --profile local_paper --minutes 10       # 只运行 10 分钟（试运行）
+    uv run trader-live --profile broker_paper --ui              # 同时打开界面（独立进程）
 
 阶段 6：只允许 local_paper 和 broker_paper（IBKR 模拟账户，DU 开头）；live 一律拒绝。
     uv run trader-live --profile broker_paper                   # IBKR 模拟账户下单
@@ -13,7 +14,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import subprocess
 import sys
+from pathlib import Path
 
 from trader.brokers.ibkr.api import IbAsyncApi, SafetyError
 from trader.config import data_dir, load_universe, project_dir
@@ -21,6 +24,7 @@ from trader.core.clock import WallClock
 from trader.core.timeutil import NS_PER_MIN, from_ns
 from trader.indicators.base import load_all
 from trader.live.config import ConfigError, load_live_config
+from trader.live.control import ControlServer
 from trader.live.runner import Alert, LiveRunner, StartupError
 from trader.strategy.base import load_user_strategies
 
@@ -54,6 +58,15 @@ async def _main(args: argparse.Namespace) -> int:
         now,
     )
     runner.on_alert = _print_alert
+    control = ControlServer(runner, cfg.control_host, cfg.ui_port)
+    try:
+        port = await control.start()
+    except OSError as exc:
+        print(f"控制端口 {cfg.ui_port} 被占用（同一运行方式已经在运行？）：{exc}")
+        return 3
+    print(f"界面连接端口 127.0.0.1:{port}；打开界面：uv run trader-live-ui --profile {cfg.profile}")
+    if args.ui:
+        _launch_ui(cfg.profile)
     try:
         await runner.startup()
         if args.start_strategy:
@@ -69,13 +82,26 @@ async def _main(args: argparse.Namespace) -> int:
         print("已手动结束。")
     finally:
         st = runner.status()
+        pos = {s: p["qty"] for s, p in st.get("positions", {}).items()}
         print(
-            f"结束：持仓 {st.get('positions', {})}，挂单 {len(st.get('open_orders', []))} 张，"
-            f"成交 {st.get('fills', 0)} 笔，迟到 bar {st.get('late_bars', 0)}，"
+            f"结束：持仓 {pos}，挂单 {len(st.get('open_orders', []))} 张，"
+            f"成交 {len(st.get('fills', []))} 笔，迟到 bar {st.get('late_bars', 0)}，"
             f"迟到修订 {st.get('late_revisions', 0)}"
         )
+        await control.close()
         runner.close()
     return 0
+
+
+def _launch_ui(profile: str) -> None:
+    """界面是独立进程：关掉界面不影响引擎。"""
+    flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    exe = Path(sys.executable)
+    pyw = exe.with_name("pythonw.exe")  # Windows 上不弹出多余的控制台窗口
+    subprocess.Popen(  # noqa: S603
+        [str(pyw if pyw.exists() else exe), "-m", "trader.apps.live_ui", "--profile", profile],
+        creationflags=flags,
+    )
 
 
 def main() -> int:
@@ -84,6 +110,7 @@ def main() -> int:
     p.add_argument("--start-strategy", action="store_true", help="启动后开启配置里的策略")
     p.add_argument("--force", action="store_true", help="数据有缺口时也开启策略")
     p.add_argument("--minutes", type=float, help="只运行这么多分钟（默认到当天盘后结束）")
+    p.add_argument("--ui", action="store_true", help="同时打开实盘版界面（独立窗口）")
     p.add_argument("--confirm-live", action="store_true", help=argparse.SUPPRESS)
     args = p.parse_args()
     if args.profile == "live":

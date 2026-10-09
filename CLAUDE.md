@@ -30,6 +30,8 @@ uv run trader backtest run config/backtests/orb_nvda.yaml      :: 结果写入 r
 uv run trader backtest list
 uv run trader-live --profile local_paper [--start-strategy] [--minutes 10]   :: 实时行情 + 本地模拟成交（只读连接模拟端口）
 uv run trader-live --profile broker_paper [--start-strategy]   :: IBKR 模拟账户下单（Gateway 需取消 Read-Only）
+run_local_paper.bat / run_broker_paper.bat   :: 双击：引擎窗口 + 实盘版界面（--ui）
+uv run trader-live-ui --profile broker_paper   :: 单独打开界面（引擎在 127.0.0.1:8764/8765）
 uv run python tools/paper_smoke.py [--check-only]   :: 模拟账户下单冒烟（1 股 SPY，常规时段）；清单 docs/paper_checklist.md
 ```
 
@@ -52,6 +54,8 @@ load_run, sweep`，示例 `user/notebooks/`。见 docs/decisions/0006。
 当天历史 `trader.data.live_history.LiveHistory`；引擎 `start(live=True)` + `push()`。
 落盘与恢复 `trader.oms.journal`；配置 `config/local_paper.yaml`（风控阈值必须全部显式）。
 阶段 6 只允许模拟端口 4002/7497 和 DU 开头的模拟账户，live 配置一律拒绝。
+实盘版界面 `trader.gui.live_window`（独立进程）只通过 `trader.live.control` 的本机端口（JSON 行）和引擎通信，
+不导入引擎（import-linter 检查）；界面关闭不影响交易。
 
 数据：`data/bars/1s/symbol=X/date=Y.parquet`（原始价格）、`data/catalog.sqlite`、`data/corporate_actions.parquet`、
 `data/live/<日期>/`（IBKR 录制）。Massive key 在 `.env` 的 `MASSIVE_API_KEY`（旧的 `config.json` 也认）。

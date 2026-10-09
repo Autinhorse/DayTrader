@@ -80,6 +80,7 @@ class LiveRunner:
     _stop: bool = False
     _reconnecting: bool = False
     startup_bars: int = 0
+    clock_sample_gap_s: float = 1.1
     executor: IbkrExecutor | None = None
     account: str = ""
     _mismatch: dict[str, str] = field(default_factory=dict)  # 上一次对账发现的不一致
@@ -120,7 +121,7 @@ class LiveRunner:
         mode = "可下单" if broker else "只读"
         self._alert(now, "startup", f"已连接 IB（账户 {self.account}，{mode}）")
         # 2. 时钟偏差
-        skew = abs(await self.api.server_time() - self.now())
+        skew = await self._clock_skew()
         if skew > cfg.max_clock_skew_ms * NS_PER_MS:
             self.api.disconnect()
             raise StartupError(
@@ -215,6 +216,30 @@ class LiveRunner:
             "策略处于暂停状态，需要人工开启",
         )  # fmt: skip
 
+    async def _clock_skew(self) -> int:
+        """本机与 IB 服务器的时间偏差下限（纳秒）。
+
+        IB 的服务器时间只精确到秒（截断），真实时间在 [t, t+1 秒) 内；本机时间取请求前后的中点，
+        再扣掉往返时间的一半。返回与这些不确定性相容的最小偏差，只有确实超出才拒绝启动。
+        """
+        best = None
+        for i in range(3):
+            if i:
+                await asyncio.sleep(self.clock_sample_gap_s)  # IB 不回应连续的时间请求
+            t0 = self.now()
+            try:
+                server = await self.api.server_time()
+            except TimeoutError:
+                continue
+            t1 = self.now()
+            mid, half_rtt = (t0 + t1) // 2, (t1 - t0) // 2
+            lo, hi = server - mid - half_rtt, server + NS_PER_SEC - mid + half_rtt
+            skew = 0 if lo <= 0 <= hi else min(abs(lo), abs(hi))
+            best = skew if best is None else min(best, skew)
+        if best is None:
+            raise StartupError("取不到 IB 服务器时间，无法核对本机时钟")
+        return best
+
     def _today(self, now: int) -> date:
         loc = self.cal.locate(now)
         if loc is not None:
@@ -232,7 +257,11 @@ class LiveRunner:
         if self.strategy_running:
             e.oms.halted.discard(self.strategy_id)
             return None
-        e.attach_strategy(cls, cls.Params(**spec.params))
+        try:
+            e.attach_strategy(cls, cls.Params(**spec.params))
+        except ValueError as exc:  # 例如标的已被手动持仓占用
+            e.detach_strategy()
+            return f"策略没有开启：{exc}"
         reason = self._check_requirements(cls, force)
         if reason is not None:
             e.detach_strategy()
@@ -474,43 +503,66 @@ class LiveRunner:
         return {s: p.qty for s, p in self.engine.portfolio.positions.items() if p.qty}
 
     def status(self) -> dict[str, Any]:
+        """完整状态快照（界面每秒刷新一次；也写入 status.json）。只含可 JSON 序列化的值。"""
         e, feed = self.engine, self.feed
-        out: dict[str, Any] = {"profile": self.cfg.profile, "ts": self.now()}
+        out: dict[str, Any] = {
+            "profile": self.cfg.profile,
+            "ts": self.now(),
+            "ready": e is not None,
+        }
         if e is None or feed is None:
             return out
         p = e.portfolio
+        orders = sorted(e.oms.orders.values(), key=lambda o: o.created_at)[-200:]
         out |= {
             "connected": feed.connected,
+            "account": self.account,
+            "session": e.oms.session.session,
             "strategy": self.cfg.strategy.name if self.cfg.strategy else None,
             "strategy_running": self.strategy_running,
             "strategy_paused": self.strategy_id in e.oms.halted,
             "halt_all_new": e.oms.halt_all_new,
+            "flattening": e.oms.session.flattening,
             "equity": p.equity(),
             "cash": float(p.cash),
+            "day_pnl": p.equity() - e.oms.session.day_start_equity,
+            "realized": float(p.realized_pnl()),
+            "unrealized": p.unrealized_pnl(),
+            "commission": float(p.commission),
             "positions": {
-                s: {"qty": x.qty, "avg_cost": float(x.avg_cost)}
+                s: {
+                    "qty": x.qty,
+                    "avg_cost": float(x.avg_cost),
+                    "last": p.last_price.get(s),
+                    "unrealized": x.unrealized_pnl,
+                    "owner": e.oms.owners.get(s, ""),
+                }
                 for s, x in p.positions.items()
                 if x.qty
             },
-            "open_orders": [
+            "orders": [_order_row(o) for o in orders],
+            "open_orders": [_order_row(o) for o in e.oms.open_orders()],
+            "fills": [
                 {
-                    "id": o.client_order_id,
-                    "symbol": o.intent.symbol,
-                    "side": o.intent.side,
-                    "qty": o.intent.qty,
-                    "type": o.intent.order_type,
-                    "status": o.status.value,
+                    "ts": f.ts,
+                    "id": f.client_order_id,
+                    "symbol": e.oms.orders[f.client_order_id].intent.symbol,
+                    "side": e.oms.orders[f.client_order_id].intent.side,
+                    "qty": f.qty,
+                    "price": float(f.price),
+                    "exec_id": f.broker_exec_id,
                 }
-                for o in e.oms.open_orders()
-            ],  # fmt: skip
-            "fills": len(e.oms.fills),
-            "account": self.account,
+                for f in e.oms.fills[-100:]
+                if f.client_order_id in e.oms.orders
+            ],
             "queued": self.executor.queued if self.executor else 0,
             "mismatch": dict(self._mismatch),
             "late_bars": e.late_bars,
             "late_revisions": feed.revisions,
             "stale": [s for s, st in feed.symbols.items() if st.stale],
             "gaps": [s for s, st in feed.symbols.items() if st.gap],
+            "symbols": sorted(feed.symbols),
+            "last_price": dict(p.last_price),
             "last_bar": {
                 s: from_ns(t).strftime("%H:%M:%S") for s, t in sorted(e.oms.last_bar_time.items())
             },
@@ -530,3 +582,26 @@ class LiveRunner:
             self.journal.close()
         if self.api.is_connected():
             self.api.disconnect()
+
+
+def _order_row(o: Order) -> dict[str, Any]:
+    it = o.intent
+    return {
+        "id": o.client_order_id,
+        "created": o.created_at,
+        "source": it.source,
+        "symbol": it.symbol,
+        "side": it.side,
+        "qty": it.qty,
+        "type": it.order_type,
+        "limit": float(it.limit_price) if it.limit_price is not None else None,
+        "stop": float(it.stop_price) if it.stop_price is not None else None,
+        "filled": o.filled_qty,
+        "avg": float(o.avg_fill_price) if o.avg_fill_price is not None else None,
+        "status": o.status.value,
+        "role": o.role,
+        "parent": o.parent_id,
+        "reason": it.reason.code,
+        "reject": f"{o.reject_rule}: {o.reject_detail}" if o.reject_rule else "",
+        "broker_id": o.broker_order_id,
+    }

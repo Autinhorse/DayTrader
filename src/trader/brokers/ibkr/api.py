@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from typing import Any, Protocol
 from trader.data.bar_builder import TradeTick
 
 PAPER_PORTS = frozenset({4002, 7497})
+HIST_TIMEOUT_S = 15.0  # 单次历史数据请求的等待上限
 LIVE_PORTS = frozenset({4001, 7496})
 
 
@@ -193,7 +195,7 @@ class IbAsyncApi:
         return list(self.ib.managedAccounts())
 
     async def server_time(self) -> int:
-        dt = await self.ib.reqCurrentTimeAsync()
+        dt = await asyncio.wait_for(self.ib.reqCurrentTimeAsync(), 5)
         return int(dt.timestamp() * 1e9)
 
     async def qualify(self, symbols: list[str]) -> list[str]:
@@ -272,15 +274,18 @@ class IbAsyncApi:
         from datetime import UTC, datetime
 
         end_dt = "" if end is None else datetime.fromtimestamp(end / 1e9, tz=UTC)
-        bars = await self.ib.reqHistoricalDataAsync(
+        # ib_async 超时只返回空列表，与“确实没有数据”分不开；这里自己计时，超时抛 TimeoutError
+        req = self.ib.reqHistoricalDataAsync(
             self._contracts[symbol],
             endDateTime=end_dt,
             durationStr=duration,
             barSizeSetting=bar_size,
             whatToShow="TRADES",
             useRTH=False,
+            timeout=0,
             formatDate=2,
         )
+        bars = await asyncio.wait_for(req, HIST_TIMEOUT_S)
         out = []
         for b in bars or []:
             d = b.date

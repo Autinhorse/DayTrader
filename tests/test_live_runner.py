@@ -90,6 +90,7 @@ def make_runner(
 ) -> LiveRunner:
     r = LiveRunner(cfg or config(), ib, UNIVERSE, tmp_path, tmp_path / "runs" / "live", clock)
     r.feed_timing = (0, 0)
+    r.clock_sample_gap_s = 0
     return r
 
 

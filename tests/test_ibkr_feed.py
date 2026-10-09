@@ -182,3 +182,29 @@ def test_long_disconnect_is_a_gap(tmp_path: Path):
     ev = feed.drain_system()
     assert any(e.kind == SystemKind.FEED_INTERRUPTED and "缺口" in e.detail for e in ev)
     assert feed.symbols["SPY"].gap
+
+
+def test_history_service_timeouts_stop_waiting(tmp_path: Path):
+    """IB 历史数据服务无响应（例如凌晨 4 点刚开盘）：
+    连续两次超时后其余标的不再请求，启动不被拖住。"""
+    ib, clock, hist, feed = make(tmp_path, tick=("SPY", "QQQ"), snap=("NVDA", "AMD", "TSLA"))
+
+    async def slow(symbol: str, duration: str, bar_size: str, end: int | None = None):  # noqa: ANN202
+        ib.hist_calls.append((symbol, duration, bar_size))
+        raise TimeoutError
+
+    ib.historical_bars = slow  # type: ignore[method-assign]
+    events = asyncio.run(feed.start())
+    assert len(ib.hist_calls) == 2  # 只等了两次
+    assert all(st.gap for st in feed.symbols.values())
+    details = [e.detail for e in events]
+    assert any("连续超时" in d for d in details)
+    assert any("跳过补数" in d and "AMD" in d for d in details)
+
+
+def test_backfill_duration_follows_elapsed_time(tmp_path: Path):
+    """刚开盘 5 分钟启动：1 秒补数只请求 6 分钟，不请求整天的 1 分钟 bar。"""
+    ib, clock, hist, feed = make(tmp_path, snap=())
+    clock.t = TD.start + 5 * NS_PER_MIN + 300 * 10**6
+    asyncio.run(feed.start())
+    assert ib.hist_calls == [("SPY", "361 S", "1 secs")]

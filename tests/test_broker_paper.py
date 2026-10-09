@@ -36,6 +36,7 @@ def make(tmp_path: Path, clock: Clock | None = None, ib: FakeIb | None = None, *
     cfg = config(profile="broker_paper", strategy=None, **kw)
     r = LiveRunner(cfg, ib, UNIVERSE, tmp_path, tmp_path / "runs" / "broker", clock)
     r.feed_timing = (0, 0)
+    r.clock_sample_gap_s = 0
     return r, ib, clock
 
 
@@ -332,6 +333,7 @@ def test_mismatch_pauses_running_strategy(tmp_path: Path, dataset):
         cfg = config(profile="broker_paper")
         r = LiveRunner(cfg, ib, UNIVERSE, tmp_path, tmp_path / "runs" / "b2", clock)
         r.feed_timing = (0, 0)
+        r.clock_sample_gap_s = 0
         await r.startup()
         assert r.start_strategy() is None
         ib.broker_positions = [BrokerPosition("DU1234567", "AAA", 7, 100.0)]

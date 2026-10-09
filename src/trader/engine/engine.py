@@ -25,7 +25,7 @@ from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
-from typing import Any
+from typing import Any, Protocol
 
 from trader.brokers.sim.matcher import SimBroker
 from trader.core.aggregation import BarAggregator, check_timeframe
@@ -38,7 +38,7 @@ from trader.core.trading_calendar import SessionFilter, TradingDay
 from trader.data.history import HistoryService
 from trader.data.indicator_service import IndicatorService
 from trader.indicators.base import create
-from trader.oms.manager import Notice, OrderManager, round_price
+from trader.oms.manager import ExecutionVenue, Notice, OrderManager, round_price
 from trader.oms.portfolio import Portfolio
 from trader.oms.risk import RiskLimits
 from trader.strategy.base import Price, Strategy, StrategyParams, StrategyState
@@ -48,6 +48,15 @@ VALUES_KEEP = 500  # 每个指标保留的历史值个数
 
 _FLATTEN = "__flatten__"
 MANUAL = "manual"  # 手动订单的来源和标的所有者
+
+
+class Venue(ExecutionVenue, Protocol):
+    """引擎使用的执行器：模拟撮合（SimBroker）或券商执行器（IbkrExecutor，后两个方法为空操作）。"""
+
+    details: dict[str, Any]
+
+    def on_bar(self, bar: Bar) -> list[Any]: ...
+    def expire(self, ts: int, outside_rth_too: bool) -> list[Any]: ...
 
 
 # ---------- 指标句柄 ----------
@@ -155,7 +164,7 @@ class BacktestEngine:
     def __init__(
         self,
         history: HistoryService,
-        broker: SimBroker,
+        broker: SimBroker | Venue,
         limits: RiskLimits,
         config: EngineConfig,
     ) -> None:
@@ -472,6 +481,12 @@ class BacktestEngine:
         order = self.oms.submit(intent, self.clock.now())
         self._deliver()
         return order
+
+    def handle_updates(self, updates: list[Any]) -> None:
+        """券商的异步回报（实盘执行器）：归约，然后回调策略。"""
+        if updates:
+            self.oms.handle(updates)
+            self._deliver()
 
     def manual_cancel(self, client_order_id: str) -> None:
         self.oms.cancel(client_order_id, self.clock.now())

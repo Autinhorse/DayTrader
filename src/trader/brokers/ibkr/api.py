@@ -61,6 +61,58 @@ class Snapshot:
     ask: float | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class OrderSpec:
+    """发给 IB 的一张订单（与 ib_async 无关的中立表示）。"""
+
+    symbol: str
+    action: str  # BUY / SELL
+    qty: int
+    order_type: str  # MKT / LMT / STP / STP LMT
+    order_ref: str  # 我们的 client_order_id
+    limit_price: float | None = None
+    stop_price: float | None = None
+    tif: str = "DAY"
+    outside_rth: bool = False
+    account: str = ""
+    parent_id: int | None = None  # 原生括号单的子单指向入场单的 IB orderId
+    transmit: bool = True  # 括号单：前两张 False，最后一张 True，三张一起生效
+
+
+@dataclass(frozen=True, slots=True)
+class BrokerOrderState:
+    order_id: int
+    perm_id: int
+    order_ref: str
+    symbol: str
+    status: str  # IB 原始状态
+    filled: float
+    remaining: float
+    why_held: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ExecReport:
+    exec_id: str
+    order_id: int
+    perm_id: int
+    order_ref: str
+    symbol: str
+    side: str  # BOT / SLD
+    qty: float
+    price: float
+    ts: int
+    commission: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BrokerPosition:
+    account: str
+    symbol: str
+    qty: float
+    avg_cost: float
+
+
 class IbApi(Protocol):
     async def connect(self, host: str, port: int, client_id: int, readonly: bool) -> None: ...
     def disconnect(self) -> None: ...
@@ -74,8 +126,18 @@ class IbApi(Protocol):
     async def historical_bars(
         self, symbol: str, duration: str, bar_size: str, end: int | None = None
     ) -> list[HistBar]: ...
-    def on_error(self, cb: Callable[[int, str, str | None], None]) -> None: ...
+    def on_error(self, cb: Callable[[int, int, str, str | None], None]) -> None: ...
     def on_disconnect(self, cb: Callable[[], None]) -> None: ...
+    # 下单（broker_paper / live；只读连接时 IB 会拒绝）
+    def next_order_id(self) -> int: ...
+    def place_order(self, order_id: int, spec: OrderSpec) -> None: ...
+    def cancel_order(self, order_id: int) -> None: ...
+    async def open_orders(self) -> list[BrokerOrderState]: ...
+    async def executions(self) -> list[ExecReport]: ...
+    async def positions(self) -> list[BrokerPosition]: ...
+    def on_order_status(self, cb: Callable[[BrokerOrderState], None]) -> None: ...
+    def on_execution(self, cb: Callable[[ExecReport], None]) -> None: ...
+    def on_commission(self, cb: Callable[[str, float], None]) -> None: ...
 
 
 def _num(x: Any) -> float | None:
@@ -100,13 +162,18 @@ class IbAsyncApi:
         self._tick_cb: dict[int, tuple[str, Callable[[TradeTick], None]]] = {}
         self._snap_cb: dict[int, tuple[str, Callable[[Snapshot], None]]] = {}
         self._tickers: dict[str, Any] = {}
+        self._orders: dict[int, Any] = {}
         self._hooked = False
 
     async def connect(self, host: str, port: int, client_id: int, readonly: bool) -> None:
         from ib_async.ib import StartupFetch
 
         check_paper_port(port)
-        fetch = StartupFetch(0) if readonly else StartupFetch.POSITIONS | StartupFetch.ORDERS_OPEN
+        fetch = (
+            StartupFetch(0)
+            if readonly
+            else StartupFetch.POSITIONS | StartupFetch.ORDERS_OPEN | StartupFetch.EXECUTIONS
+        )
         await self.ib.connectAsync(
             host, port, clientId=client_id, readonly=readonly, fetchFields=fetch
         )
@@ -236,11 +303,91 @@ class IbAsyncApi:
             )
         return out
 
-    def on_error(self, cb: Callable[[int, str, str | None], None]) -> None:
+    def on_error(self, cb: Callable[[int, int, str, str | None], None]) -> None:
         def handler(req_id: int, code: int, msg: str, contract: Any) -> None:
-            cb(code, msg, getattr(contract, "symbol", None) if contract else None)
+            cb(req_id, code, msg, getattr(contract, "symbol", None) if contract else None)
 
         self.ib.errorEvent += handler
 
     def on_disconnect(self, cb: Callable[[], None]) -> None:
         self.ib.disconnectedEvent += cb
+
+    # ---------- 下单 ----------
+
+    def next_order_id(self) -> int:
+        return self.ib.client.getReqId()
+
+    def place_order(self, order_id: int, spec: OrderSpec) -> None:
+        """新单或改单（同一个 orderId 再发一次就是改单）。"""
+        from ib_async import Order
+
+        o = self._orders.get(order_id) or Order()
+        o.orderId = order_id
+        o.action = spec.action
+        o.totalQuantity = spec.qty
+        o.orderType = spec.order_type
+        o.lmtPrice = spec.limit_price if spec.limit_price is not None else UNSET_DOUBLE
+        o.auxPrice = spec.stop_price if spec.stop_price is not None else UNSET_DOUBLE
+        o.tif = spec.tif
+        o.outsideRth = spec.outside_rth
+        o.orderRef = spec.order_ref
+        o.account = spec.account
+        o.parentId = spec.parent_id or 0
+        o.transmit = spec.transmit
+        self._orders[order_id] = o
+        self.ib.placeOrder(self._contracts[spec.symbol], o)
+
+    def cancel_order(self, order_id: int) -> None:
+        o = self._orders.get(order_id)
+        if o is None:  # 不是本次连接发出的（例如重启前的挂单）：按 orderId 撤
+            self.ib.client.cancelOrder(order_id, "")
+            return
+        self.ib.cancelOrder(o)
+
+    async def open_orders(self) -> list[BrokerOrderState]:
+        trades = await self.ib.reqAllOpenOrdersAsync()
+        return [_order_state(t) for t in trades]
+
+    async def executions(self) -> list[ExecReport]:
+        fills = await self.ib.reqExecutionsAsync()
+        return [_exec_report(f) for f in fills]
+
+    async def positions(self) -> list[BrokerPosition]:
+        ps = await self.ib.reqPositionsAsync()
+        return [
+            BrokerPosition(p.account, p.contract.symbol, float(p.position), float(p.avgCost))
+            for p in ps
+        ]
+
+    def on_order_status(self, cb: Callable[[BrokerOrderState], None]) -> None:
+        self.ib.orderStatusEvent += lambda trade: cb(_order_state(trade))
+
+    def on_execution(self, cb: Callable[[ExecReport], None]) -> None:
+        self.ib.execDetailsEvent += lambda trade, fill: cb(_exec_report(fill))
+
+    def on_commission(self, cb: Callable[[str, float], None]) -> None:
+        def handler(trade: Any, fill: Any, report: Any) -> None:
+            cb(report.execId, float(report.commission))
+
+        self.ib.commissionReportEvent += handler
+
+
+UNSET_DOUBLE = 1.7976931348623157e308  # IB 的“未设置”价格
+
+
+def _order_state(trade: Any) -> BrokerOrderState:
+    o, st = trade.order, trade.orderStatus
+    return BrokerOrderState(
+        o.orderId, o.permId, o.orderRef or "", trade.contract.symbol, st.status,
+        float(st.filled), float(st.remaining), st.whyHeld or "",
+    )  # fmt: skip
+
+
+def _exec_report(fill: Any) -> ExecReport:
+    e = fill.execution
+    cr = getattr(fill, "commissionReport", None)
+    comm = float(cr.commission) if cr is not None and cr.execId else None
+    return ExecReport(
+        e.execId, e.orderId, e.permId, e.orderRef or "", fill.contract.symbol, e.side,
+        float(e.shares), float(e.price), int(e.time.timestamp() * 1e9), comm,
+    )  # fmt: skip

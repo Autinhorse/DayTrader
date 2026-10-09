@@ -29,6 +29,7 @@ class IbkrConnection(BaseModel):
     host: str = "127.0.0.1"
     port: int = 4002
     client_id: int = Field(default=21, description="与录制脚本（91）、TWS 手动连接区分")
+    account: str = Field(default="", description="下单账户；只登录了一个账户时可留空")
 
 
 class FeedOptions(BaseModel):

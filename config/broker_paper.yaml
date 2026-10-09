@@ -1,0 +1,48 @@
+# IBKR 模拟账户（DESIGN.md 9.4、12.2）：IBKR 实时行情 + 在 IBKR 模拟账户真实下单（原生括号单），每分钟对账。
+# 启动：uv run trader-live --profile broker_paper [--start-strategy] [--minutes 10]
+# 需要 IB Gateway 取消勾选“Read-Only API”；只允许模拟端口和 DU 开头的模拟账户。
+profile: broker_paper
+
+ibkr:
+  host: 127.0.0.1
+  port: 4002          # 4002 = Gateway 模拟账户；实盘端口一律拒绝
+  client_id: 22      # 与 local_paper（21）分开，IB 的订单号按连接编号区分
+  account: ""         # 只登录了一个模拟账户时可留空
+
+feed:
+  tick_limit: 5       # 账户的逐笔成交并发额度
+  grace_ms: 1000      # 1 秒 bar 封口宽限（决策 0007：300 毫秒时约 10% 的成交会迟到）
+  watchdog_regular_s: 30
+  watchdog_extended_s: 600
+  record: true        # 实时 tick 和 1 秒 bar 落盘到 data/live/<日期>/broker_paper/
+
+symbols: []           # 空 = universe.yaml 全部
+
+# 策略（可选）。启动后默认暂停，加 --start-strategy 才开启。
+strategy:
+  name: orb_breakout
+  params: {symbol: NVDA}
+
+session: extended     # 行情包含盘前盘后
+trade_extended: false # 只在常规时段开仓
+hold_post: false      # 常规收盘前平仓
+initial_cash: 100000  # 风控按这个规模计算（模拟账户实际资金更多）
+
+
+# 风控阈值必须全部显式填写（DESIGN.md 12.3），缺一项拒绝启动
+risk:
+  max_order_qty: 5000
+  max_order_usd: 20000
+  max_position_usd: 20000
+  max_gross_exposure_usd: 100000
+  max_daily_loss_usd: 2000
+  max_orders_per_min: 10
+  price_protection_pct: 3.0
+  allow_short: true
+  no_open_first_min: 0
+  no_open_before_flatten_min: 10
+  duplicate_window_s: 2
+  max_data_age_s: 120
+  flatten_before_close_min: 5
+
+max_clock_skew_ms: 2000

@@ -4,7 +4,8 @@
     uv run trader-live --profile local_paper --start-strategy   # 同时开启配置里的策略
     uv run trader-live --profile local_paper --minutes 10       # 只运行 10 分钟（试运行）
 
-阶段 6：只允许 local_paper（broker_paper 在后续步骤完成）；live 一律拒绝。
+阶段 6：只允许 local_paper 和 broker_paper（IBKR 模拟账户，DU 开头）；live 一律拒绝。
+    uv run trader-live --profile broker_paper                   # IBKR 模拟账户下单
 运行状态每分钟写入 runs/live/<日期>/<profile>/status.json，提醒和告警同时打印在窗口里。
 """
 
@@ -87,9 +88,6 @@ def main() -> int:
     args = p.parse_args()
     if args.profile == "live":
         print("拒绝启动：阶段 6 不支持实盘（live）；实盘接入在阶段 7。")
-        return 3
-    if args.profile == "broker_paper":
-        print("broker_paper 尚未完成（阶段 6 的下一步），目前请用 local_paper。")
         return 3
     try:
         return asyncio.run(_main(args))

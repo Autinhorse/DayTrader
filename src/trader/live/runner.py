@@ -1,8 +1,13 @@
-"""实盘版运行器（DESIGN.md 5.5、9.4、12.3、12.4）。阶段 6 先实现 local_paper：
-IBKR 实时行情 + 本地模拟撮合（SimBroker），不向券商发送任何订单（连接用只读模式）。
+"""实盘版运行器（DESIGN.md 5.5、8.5、9.4、12.3、12.4）。两种模拟方式：
 
-主循环每 100 毫秒：取本机时间 → 行情源封口 1 秒 bar → 送入引擎并推进到当前时刻 →
+- local_paper：IBKR 实时行情 + 本地模拟撮合（SimBroker），不向券商发送任何订单（连接用只读模式）；
+- broker_paper：IBKR 实时行情 + IBKR 模拟账户执行（IbkrExecutor，原生括号单），定期与券商对账。
+
+主循环每 100 毫秒：取本机时间 → 券商回报归约 → 行情源封口 1 秒 bar → 送入引擎并推进到当前时刻 →
 系统事件（断线、行情中断、缺口）暂停相关策略 → 订单和成交落盘 → 落盘成功后发出请求。
+
+对账（broker_paper）：每分钟比较本地持仓与券商持仓、券商挂单里有没有不认识的订单；连续两次不一致
+就发 RECONCILE_MISMATCH、暂停策略、等人工处理，不自动修正。人工可以“按券商持仓重置”。
 
 启动检查（任何一项不通过就拒绝启动）：配置合法（风控阈值全部显式、只允许模拟端口）、
 账户号是模拟账户（DU 开头）、本机与 IB 服务器时间偏差在阈值内、按固定顺序完成订阅和补数。
@@ -21,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from trader.brokers.ibkr.api import IbApi, SafetyError, check_paper_accounts
+from trader.brokers.ibkr.executor import IbkrExecutor
 from trader.brokers.ibkr.feed import FeedSettings, IbkrFeed
 from trader.brokers.sim.matcher import SimBroker
 from trader.config import Universe
@@ -34,6 +40,7 @@ from trader.engine.engine import MANUAL, BacktestEngine, EngineConfig
 from trader.live.config import LiveConfig
 from trader.oms.journal import Journal, recover_into
 from trader.oms.manager import Notice
+from trader.oms.orders import QueryResult
 from trader.strategy.base import Strategy, get_strategy
 
 LOOP_MS = 100
@@ -73,6 +80,11 @@ class LiveRunner:
     _stop: bool = False
     _reconnecting: bool = False
     startup_bars: int = 0
+    executor: IbkrExecutor | None = None
+    account: str = ""
+    _mismatch: dict[str, str] = field(default_factory=dict)  # 上一次对账发现的不一致
+    _last_reconcile: int = 0
+    _tasks: set[asyncio.Future] = field(default_factory=set)
     feed_timing: tuple[float, float] = (
         3.0,
         0.3,
@@ -86,18 +98,27 @@ class LiveRunner:
 
     async def startup(self) -> None:
         cfg = self.cfg
-        if cfg.profile != "local_paper":
-            raise StartupError(f"运行方式 {cfg.profile} 尚未实现（阶段 6 先做 local_paper）")
+        if cfg.profile not in ("local_paper", "broker_paper"):
+            raise StartupError(f"阶段 6 不支持运行方式 {cfg.profile}")
+        broker = cfg.profile == "broker_paper"
         now = self.now()
         today = self._today(now)
         self._alert(now, "startup", f"{cfg.profile} 启动，交易日 {today}")
-        # 1. 连接（local_paper 只读，不可能下单）+ 账户检查
-        await self.api.connect(cfg.ibkr.host, cfg.ibkr.port, cfg.ibkr.client_id, True)
+        # 1. 连接（local_paper 只读，不可能下单；broker_paper 可下单）+ 账户检查
+        await self.api.connect(cfg.ibkr.host, cfg.ibkr.port, cfg.ibkr.client_id, not broker)
         try:
-            check_paper_accounts(self.api.managed_accounts())
+            accounts = self.api.managed_accounts()
+            check_paper_accounts(accounts)
+            if cfg.ibkr.account and cfg.ibkr.account not in accounts:
+                raise SafetyError(f"配置的账户 {cfg.ibkr.account} 不在已登录的账户 {accounts} 里")
+            if broker and not cfg.ibkr.account and len(accounts) != 1:
+                raise SafetyError(f"登录了多个账户 {accounts}，请在配置 ibkr.account 里指定一个")
+            self.account = cfg.ibkr.account or accounts[0]
         except SafetyError:
             self.api.disconnect()
             raise
+        mode = "可下单" if broker else "只读"
+        self._alert(now, "startup", f"已连接 IB（账户 {self.account}，{mode}）")
         # 2. 时钟偏差
         skew = abs(await self.api.server_time() - self.now())
         if skew > cfg.max_clock_skew_ms * NS_PER_MS:
@@ -134,11 +155,14 @@ class LiveRunner:
         self._alert(self.now(), "startup", f"订阅 {len(tick)} 个逐笔、{len(snap)} 个快照，补数中…")
         for ev in await self.feed.start():
             self._system(ev)
-        # 5. 引擎（实时模式）+ 模拟撮合
+        # 5. 引擎（实时模式）+ 执行器（模拟撮合或 IBKR）
         sim = cfg.sim.model_copy(update={"bar_grace_ms": cfg.feed.grace_ms})
+        if broker:
+            self.executor = IbkrExecutor(self.api, self.now, self.account)
+            self.executor.bind()
         self.engine = BacktestEngine(
             history,
-            SimBroker(sim),
+            self.executor if self.executor is not None else SimBroker(sim),
             cfg.risk,
             EngineConfig(
                 strategy_id=self.strategy_id,
@@ -152,6 +176,7 @@ class LiveRunner:
         )
         e = self.engine
         e.oms.deferred = True
+        e.oms.native_brackets = broker
         e.oms.on_system = lambda ts, ref, msg: self._alert(ts, "order", msg, None)
         e.notice_listeners.append(self._on_notice)
         e.on_new_symbol = self._on_new_symbol
@@ -163,10 +188,14 @@ class LiveRunner:
         rec = self.journal.load()
         if rec.orders:
             to_query = recover_into(e.oms, rec, start)
-            # 本地模拟撮合不保存挂单：恢复后查询结果都是“没有这张订单”
-            from trader.oms.orders import QueryResult
-
-            e.oms.handle([QueryResult(c, start, found=False) for c in to_query])
+            if self.executor is not None:
+                # 向券商查询：挂单状态、断线或崩溃期间的成交；UNKNOWN 的订单给出结论
+                self.executor.adopt(list(e.oms.orders.values()))
+                await self.executor.sync(query=to_query)
+                e.handle_updates(self.executor.drain())
+            else:
+                # 本地模拟撮合不保存挂单：恢复后查询结果都是“没有这张订单”
+                e.oms.handle([QueryResult(c, start, found=False) for c in to_query])
             e.cfg.initial_state = rec.states.get(self.strategy_id, {})
             self._alert(
                 start, "recover", f"从日志恢复 {len(rec.orders)} 张订单，持仓 {self.positions()}"
@@ -177,6 +206,8 @@ class LiveRunner:
             self.strategy_cls = get_strategy(self.cfg.strategy.name)
         # 补数期间实时数据已经在缓冲：先处理掉（策略此时尚未开启），不算作运行中的迟到
         self.step(self.now())
+        if self.executor is not None:
+            await self.reconcile()
         self.startup_bars, e.late_bars = e.late_bars, 0
         self._alert(
             self.now(), "startup",
@@ -278,6 +309,9 @@ class LiveRunner:
         last_status = 0
         while not self._stop and self.now() < until:
             self.step(self.now())
+            if self.executor is not None and self.now() - self._last_reconcile >= 60 * NS_PER_SEC:
+                self._last_reconcile = self.now()
+                self._spawn(self.reconcile())
             if self.now() - last_status >= 60 * NS_PER_SEC:
                 last_status = self.now()
                 self._write_status()
@@ -288,14 +322,77 @@ class LiveRunner:
         self._write_status()
 
     def step(self, now: int) -> None:
-        e, feed = self.engine, self.feed
+        e, feed, ex = self.engine, self.feed, self.executor
         assert e is not None and feed is not None
+        if ex is not None:
+            e.handle_updates(ex.drain())
         e.push(feed.poll(now))
         e.advance(now)
         for ev in feed.drain_system():
             self._system(ev)
         self._persist(now)
+        if ex is not None:
+            ex.pump(now)
+            self._changed.update(ex.assigned)
+            ex.assigned.clear()
+            for t, ref, msg in ex.messages:
+                self._alert(t, "broker", f"{ref} {msg}".strip())
+            ex.messages.clear()
+            timed_out = ex.take_timed_out()
+            if timed_out:
+                self._alert(now, "broker", f"发送超时，向券商查询：{timed_out}")
+                self._spawn(ex.sync(query=timed_out))
         feed.flush()
+
+    def _spawn(self, coro: Any) -> None:
+        task = asyncio.ensure_future(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    # ---------- 对账（DESIGN.md 8.5） ----------
+
+    async def reconcile(self) -> dict[str, str]:
+        """比较本地持仓与券商持仓、券商的挂单。连续两次不一致才报警（避免成交在途的瞬时差异）。
+
+        返回本次发现的不一致（标的或订单 → 说明）。
+        """
+        e, ex = self.engine, self.executor
+        if e is None or ex is None:
+            return {}
+        self._last_reconcile = self.now()
+        broker_pos = {
+            p.symbol: int(round(p.qty))
+            for p in await self.api.positions()
+            if p.account == self.account and p.qty
+        }
+        local = {s: p.qty for s, p in e.portfolio.positions.items() if p.qty}
+        found: dict[str, str] = {}
+        for sym in sorted(set(broker_pos) | set(local)):
+            b, mine = broker_pos.get(sym, 0), local.get(sym, 0)
+            if b != mine:
+                found[sym] = f"本地持仓 {mine}，券商持仓 {b}"
+        for oid, st in ex.foreign.items():
+            if st.status not in ("Cancelled", "ApiCancelled", "Filled", "Inactive"):
+                found[f"order:{oid}"] = f"券商有不认识的挂单 {st.symbol}（orderRef={st.order_ref}）"
+        confirmed = {k: v for k, v in found.items() if self._mismatch.get(k) == v}
+        self._mismatch = found
+        if confirmed:
+            detail = "；".join(f"{k}: {v}" for k, v in confirmed.items())
+            self._system(SystemEvent(SystemKind.RECONCILE_MISMATCH, self.now(), detail))
+        return found
+
+    def resync_to_broker(self, positions: dict[str, tuple[int, float]]) -> None:
+        """人工操作“按券商持仓重置”：本地持仓改为券商的数字，归属转为手动（不下任何单）。"""
+        e = self.engine
+        if e is None:
+            return
+        for sym in set(positions) | {s for s, p in e.portfolio.positions.items() if p.qty}:
+            qty, cost = positions.get(sym, (0, 0.0))
+            e.portfolio.set_position(sym, qty, Decimal(str(cost)))
+            if qty and sym not in e.oms.owners:
+                e.oms.owners[sym] = MANUAL
+        self._mismatch.clear()
+        self._alert(self.now(), "reconcile", f"已按券商持仓重置：{positions}")
 
     def stop(self) -> None:
         self._stop = True
@@ -407,6 +504,9 @@ class LiveRunner:
                 for o in e.oms.open_orders()
             ],  # fmt: skip
             "fills": len(e.oms.fills),
+            "account": self.account,
+            "queued": self.executor.queued if self.executor else 0,
+            "mismatch": dict(self._mismatch),
             "late_bars": e.late_bars,
             "late_revisions": feed.revisions,
             "stale": [s for s, st in feed.symbols.items() if st.stale],

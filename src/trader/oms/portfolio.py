@@ -46,6 +46,14 @@ class Portfolio:
         self.update_mark(symbol, float(price))
         return realized
 
+    def set_position(self, symbol: str, qty: int, avg_cost: Decimal) -> None:
+        """人工按券商持仓重置（对账后）。现金按差额调整，使权益不因重置而跳变。"""
+        pos = self.position(symbol)
+        mark = self.last_price.get(symbol, float(avg_cost))
+        self.cash -= Decimal(str(mark)) * (qty - pos.qty)
+        pos.qty, pos.avg_cost = qty, avg_cost if qty else Decimal(0)
+        self.update_mark(symbol, mark)
+
     def apply_commission(self, amount: Decimal) -> None:
         self.cash -= amount
         self.commission += amount

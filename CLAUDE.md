@@ -29,6 +29,8 @@ uv run trader strategies list                                  :: user/strategie
 uv run trader backtest run config/backtests/orb_nvda.yaml      :: 结果写入 runs/<run_id>/
 uv run trader backtest list
 uv run trader-live --profile local_paper [--start-strategy] [--minutes 10]   :: 实时行情 + 本地模拟成交（只读连接模拟端口）
+uv run trader-live --profile broker_paper [--start-strategy]   :: IBKR 模拟账户下单（Gateway 需取消 Read-Only）
+uv run python tools/paper_smoke.py [--check-only]   :: 模拟账户下单冒烟（1 股 SPY，常规时段）；清单 docs/paper_checklist.md
 ```
 
 聚合：`trader.core.aggregation.BarAggregator`（增量，回测/实时用）与 `trader.data.aggregate`（向量化，历史/图表用）

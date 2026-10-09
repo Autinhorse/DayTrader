@@ -1,8 +1,13 @@
 """订单管理（DESIGN.md 8.2）：生成订单号、风控、交给执行器、按回报归约订单并更新持仓。
 
-括号单：入场单成交后由这里生成止盈（限价）和止损（止损单）两张子单，同属一个 OCA 组；
+括号单有两种方式：
+- **本地管理**（回测、回放、local_paper）：入场单成交后由这里生成止盈（限价）和
+  止损（止损单）两张子单，同属一个 OCA 组；
 子单数量始终等于"入场单累计成交量 − 已成交的退出量"，一张退出单成交后另一张随之缩减或撤销，
 不会超量卖出形成反向持仓。入场单撤销时没有成交的部分不生成子单。
+- **券商原生**（native_brackets=True，broker_paper / live）：下单时三张单一起发给券商（父子单），
+  入场单一成交，保护单就已经在券商端生效，即使本机程序崩溃也有保护。两张保护单之间的互相缩减由券商的
+  OCA 规则完成；这里只在入场单终结且只部分成交时，把保护单改成实际成交的数量。
 
 实盘相关（阶段 6）：
 - **发件箱**：deferred=True 时，下单、撤单、改单请求先进入 outbox，
@@ -103,6 +108,7 @@ class OrderManager:
     halted: set[str] = field(default_factory=set)
     halt_all_new: bool = False
     commission_log: list[CommissionUpdate] = field(default_factory=list)  # 落盘用
+    native_brackets: bool = False
     _notes_seen: dict[str, int] = field(default_factory=dict)
 
     # ---------- 标的归属（DESIGN.md 7.4） ----------
@@ -134,6 +140,8 @@ class OrderManager:
         for o in self.open_orders():
             if o.client_order_id == exclude:
                 continue
+            if o.parent_id is not None and self.orders[o.parent_id].filled_qty == 0:
+                continue  # 原生括号单里尚未激活的保护单不占敞口
             b, s = out.get(o.intent.symbol, (0, 0))
             if o.intent.side == "BUY":
                 b += o.remaining_qty
@@ -209,8 +217,31 @@ class OrderManager:
         order.status = OrderStatus.SUBMITTED
         order.status_times[OrderStatus.SUBMITTED] = now
         self._notify(Notice("order", order))
-        self._send("submit", order, None, now)
+        if self.native_brackets and order.role == "entry":
+            self._create_native_children(order, now)
+            self._send("bracket", order, None, now)
+        else:
+            self._send("submit", order, None, now)
         return order
+
+    def _create_native_children(self, parent: Order, now: int) -> None:
+        """原生括号单：保护单与入场单同时创建（数量 = 入场数量），随入场单一起发出。"""
+        for role, intent in self._child_intents(parent, parent.intent.qty):
+            child = Order(
+                intent=intent, client_order_id=self._new_id(intent.source), created_at=now
+            )
+            if child.client_order_id in self.orders:  # 恢复后重新处理同一事件
+                continue
+            child.parent_id, child.oca_group, child.role = (
+                parent.client_order_id,
+                parent.client_order_id,
+                role,
+            )
+            child.status_times[OrderStatus.NEW] = now
+            child.status = OrderStatus.SUBMITTED
+            child.status_times[OrderStatus.SUBMITTED] = now
+            self.orders[child.client_order_id] = child
+            self._notify(Notice("order", child))
 
     # ---------- 发件箱 ----------
 
@@ -224,6 +255,10 @@ class OrderManager:
         coid = order.client_order_id
         if action == "submit":
             updates = self.venue.submit(order, now + self.decision_delay_ns, now)
+        elif action == "bracket":
+            updates = self.venue.submit_bracket(  # type: ignore[attr-defined]
+                order, self._children(order), now + self.decision_delay_ns, now
+            )
         elif action == "cancel":
             updates = self.venue.cancel(coid, now)
         else:
@@ -363,6 +398,9 @@ class OrderManager:
         return [o for o in self.orders.values() if o.parent_id == parent.client_order_id]
 
     def _sync_children(self, parent: Order, now: int) -> None:
+        if self.native_brackets:
+            self._sync_native_children(parent, now)
+            return
         children = self._children(parent)
         exits_filled = sum(c.filled_qty for c in children)
         target = parent.filled_qty - exits_filled  # 还需要保护的数量
@@ -382,7 +420,28 @@ class OrderManager:
             if want != asked:
                 self.modify(c.client_order_id, now, qty=want)
 
-    def _create_children(self, parent: Order, qty: int, now: int) -> None:
+    def _sync_native_children(self, parent: Order, now: int) -> None:
+        """入场单还在工作：保护单由券商管理，不动。入场单终结后：没有成交则撤销保护单
+        （券商通常已自动撤销，重复撤单无害）；部分成交则把保护单改成实际需要保护的数量。"""
+        if not parent.status.is_terminal or parent.filled_qty >= parent.intent.qty:
+            return
+        children = self._children(parent)
+        active = [c for c in children if not c.status.is_terminal]
+        if parent.filled_qty == 0:
+            for c in active:
+                self.cancel(c.client_order_id, now)
+            return
+        target = parent.filled_qty - sum(c.filled_qty for c in children)
+        for c in active:
+            if c.status == OrderStatus.PENDING_CANCEL:
+                continue
+            want = c.filled_qty + max(target, 0)
+            if want <= c.filled_qty:
+                self.cancel(c.client_order_id, now)
+            elif want != (c.pending_intent or c.intent).qty:
+                self.modify(c.client_order_id, now, qty=want)
+
+    def _child_intents(self, parent: Order, qty: int) -> list[tuple[str, OrderIntent]]:
         it = parent.intent
         side = "SELL" if it.side == "BUY" else "BUY"
         base = {
@@ -394,26 +453,34 @@ class OrderManager:
             "outside_rth": it.outside_rth,
         }
         ctx = dict(it.reason.context)
+        out: list[tuple[str, OrderIntent]] = []
         if it.take_profit is not None:
-            tp = OrderIntent(
-                **base,  # type: ignore[arg-type]
-                order_type="LMT",
-                limit_price=it.take_profit,
-                reason=Reason("take_profit", f"括号单止盈（入场单 {parent.client_order_id}）", ctx),
-            )
-            self.submit(
-                tp, now, exit_order=True, parent_id=parent.client_order_id, role="take_profit"
-            )
+            out.append((
+                "take_profit",
+                OrderIntent(
+                    **base,  # type: ignore[arg-type]
+                    order_type="LMT",
+                    limit_price=it.take_profit,
+                    reason=Reason("take_profit", f"括号单止盈（入场单 {parent.client_order_id}）",
+                                  ctx),
+                ),
+            ))  # fmt: skip
         if it.stop_loss is not None:
-            sl = OrderIntent(
-                **base,  # type: ignore[arg-type]
-                order_type="STP",
-                stop_price=it.stop_loss,
-                reason=Reason("stop_loss", f"括号单止损（入场单 {parent.client_order_id}）", ctx),
-            )
-            self.submit(
-                sl, now, exit_order=True, parent_id=parent.client_order_id, role="stop_loss"
-            )
+            out.append((
+                "stop_loss",
+                OrderIntent(
+                    **base,  # type: ignore[arg-type]
+                    order_type="STP",
+                    stop_price=it.stop_loss,
+                    reason=Reason("stop_loss", f"括号单止损（入场单 {parent.client_order_id}）",
+                                  ctx),
+                ),
+            ))  # fmt: skip
+        return out
+
+    def _create_children(self, parent: Order, qty: int, now: int) -> None:
+        for role, intent in self._child_intents(parent, qty):
+            self.submit(intent, now, exit_order=True, parent_id=parent.client_order_id, role=role)
 
     # ---------- 收盘前平仓（DESIGN.md 8.4） ----------
 

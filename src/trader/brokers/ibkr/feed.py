@@ -26,7 +26,7 @@ import polars as pl
 from trader.brokers.ibkr.api import HistBar, IbApi, Snapshot
 from trader.core.events import BarEvent, SystemEvent, SystemKind
 from trader.core.models import Bar, MarketMeta
-from trader.core.timeutil import NS_PER_MIN, NS_PER_SEC, from_ns
+from trader.core.timeutil import NS_PER_MIN, NS_PER_SEC
 from trader.core.trading_calendar import TradingCalendar
 from trader.data.bar_builder import (
     DEFAULT_LIVE_GRACE_MS,
@@ -163,12 +163,9 @@ class IbkrFeed:
         st = self.symbols[symbol]
         boundary = st.builder.start_ns
         loc = self.cal.locate(boundary)
-        day = loc[0] if loc is not None else None
-        if day is None:  # 不在交易时段内启动：当天没有可补的数据
-            nxt = self.cal.trading_days(from_ns(boundary).date(), from_ns(boundary).date())
-            day = nxt[0] if nxt else None
-            if day is None or boundary < day.start:
-                return
+        if loc is None:  # 不在任何交易时段内启动（例如 20:00 之后、周末）：没有可补的当天数据
+            return
+        day = loc[0]
         fine: list[HistBar] = []
         coarse: list[HistBar] = []
         try:
@@ -224,7 +221,7 @@ class IbkrFeed:
             },
         )  # fmt: skip
 
-    def _on_error(self, code: int, msg: str, symbol: str | None) -> None:
+    def _on_error(self, req_id: int, code: int, msg: str, symbol: str | None) -> None:
         if code in (2104, 2106, 2107, 2108, 2158, 2119):  # 行情农场连接状态的通知
             return
         if code == 1100:

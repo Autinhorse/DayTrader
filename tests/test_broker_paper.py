@@ -175,6 +175,11 @@ def test_broker_rejections_and_messages(tmp_path: Path, dataset):
         ib.error(103, "Duplicate order id", req_id=ib.id_of(b))
         await tick(r, ib, clock)
         assert oms.orders[b].status == OrderStatus.ACCEPTED and oms.orders[b].intent.qty == 11
+        # 括号单联动撤销后再撤：不是失败
+        ib.error(10148, "cannot be cancelled, state: Cancelled.",
+                 req_id=ib.id_of(b))  # fmt: skip
+        await tick(r, ib, clock)
+        assert any("无需处理" in x.detail for x in r.alerts if x.kind == "broker")
         r.close()
 
     run(main)
@@ -283,6 +288,29 @@ def test_crash_after_send_recovers_fill_from_broker(tmp_path: Path, dataset):
         assert r2.positions() == {"AAA": 30}
         assert r2._mismatch == {}  # 对账一致
         assert ib2.placed == []  # 没有重发
+        r2.close()
+
+    run(main)
+
+
+def test_new_order_after_restart_gets_fresh_id(tmp_path: Path, dataset):
+    """重启恢复旧订单后再下单：订单号不能和恢复的订单重复，新单必须真正发出。"""
+
+    async def main() -> None:
+        r, ib, clock = make(tmp_path)
+        await r.startup()
+        old = manual(r, 10)
+        await tick(r, ib, clock)
+        r.close()
+        clock2 = Clock(clock.t + 30 * S)
+        ib2 = fake_ib(clock2)
+        ib2.states, ib2.execs, ib2.specs = ib.states, ib.execs, ib.specs
+        r2, _, _ = make(tmp_path, clock2, ib2)
+        await r2.startup()
+        new = manual(r2, 20)
+        await tick(r2, ib2, clock2)
+        assert new != old
+        assert [spec.qty for _, spec in ib2.placed] == [20]
         r2.close()
 
     run(main)

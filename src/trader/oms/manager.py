@@ -12,8 +12,9 @@
 实盘相关（阶段 6）：
 - **发件箱**：deferred=True 时，下单、撤单、改单请求先进入 outbox，
   由引擎在落盘提交后调用 flush() 发出；回测和回放 deferred=False，立即发出。
-- **确定性订单号**：id_provider 由引擎设置为“输入事件编号-序号”，崩溃恢复后重新处理同一事件，
-  生成的订单号相同，已存在的订单不会重复创建（幂等）。
+- **订单号**：默认“来源-序号”，跳过已有订单号（崩溃恢复后不重复）。
+  输入事件与它产生的订单在同一事务里落盘，未处理完的输入重新处理时不会已有订单。
+  可选的 id_provider 生成确定性订单号时，已存在的订单不重复创建（幂等）。
 - **收盘前平仓**：撤单请求发出后，等到该标的没有任何未终结订单（撤单确认或成交）
   才按实际持仓发平仓单。
 - 回报中的异常（迟到成交、无法识别的状态、未知订单的回报）通过 on_system 报告，
@@ -176,8 +177,12 @@ class OrderManager:
     def _new_id(self, source: str) -> str:
         if self.id_provider is not None:
             return self.id_provider(source)
-        self._seq += 1
-        return f"{source}-{self._seq:06d}"
+        # 恢复后序号从 0 重新数：跳过已有的订单号，否则新单会被当成“已存在”而不发出
+        while True:
+            self._seq += 1
+            coid = f"{source}-{self._seq:06d}"
+            if coid not in self.orders:
+                return coid
 
     def submit(
         self,

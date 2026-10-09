@@ -260,7 +260,10 @@ class IbkrExecutor:
             self.messages.append((now, coid, f"IB {code}: {msg}"))
             return
         self._awaiting.pop(coid, None)
-        if code in CANCEL_FAIL_CODES:
+        if code in CANCEL_FAIL_CODES and "Cancelled" in msg:
+            # 括号单的一张保护单被撤时 IB 会联动撤销另一张，我们随后的撤单就会收到 10148
+            self.messages.append((now, coid, f"订单已是撤销状态，无需处理（IB {code}）"))
+        elif code in CANCEL_FAIL_CODES:
             self.messages.append((now, coid, f"撤单未成功 IB {code}: {msg}"))
         elif code == 202:
             self._updates.append(Cancelled(coid, now, msg))

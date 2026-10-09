@@ -101,20 +101,29 @@ async def main(check_only: bool) -> int:
     def st(coid: str) -> OrderStatus:
         return e.oms.orders[coid].status
 
-    await run_until(lambda: SYM in e.portfolio.last_price, 10)
+    if not await run_until(lambda: SYM in e.portfolio.last_price, 20):
+        print(f"20 秒内没有收到 {SYM} 的逐笔成交，不下单。请重启 IB Gateway 后再试。")
+        runner.close()
+        return 2
     last = e.portfolio.last_price[SYM]
     start_pos = e.portfolio.position(SYM).qty
     print(f"SPY 最新价 {last}，起始持仓 {start_pos}")
 
     print("1. 限价单：下单 → 改价 → 撤单")
-    lo = round_price(last * 0.95)
+    lo = round_price(last * 0.98)  # 风控限价偏离上限默认 3%
     a = order(1, order_type="LMT", limit_price=lo)
     check("券商接受", await run_until(lambda: st(a) == OrderStatus.ACCEPTED), str(lo))
-    e.oms.modify(a, now(), limit_price=round_price(last * 0.94))
-    ok = await run_until(
+    lo2 = round_price(last * 0.975)
+    rej = e.oms.modify(a, now(), limit_price=lo2)
+    ok = rej is None and await run_until(
         lambda: st(a) == OrderStatus.ACCEPTED and e.oms.orders[a].pending_intent is None
     )
-    check("改单确认", ok, str(e.oms.orders[a].intent.limit_price))
+    ok = ok and e.oms.orders[a].intent.limit_price == lo2
+    check(
+        "改单确认",
+        ok,
+        f"{e.oms.orders[a].intent.limit_price}" + (f" 被风控拒绝：{rej}" if rej else ""),
+    )
     e.manual_cancel(a)
     check("撤单确认", await run_until(lambda: st(a) == OrderStatus.CANCELLED))
 

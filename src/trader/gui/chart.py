@@ -129,7 +129,7 @@ class ChartWidget(QWidget):
             bar.addWidget(w)
         bar.addStretch()
         self.view = ChartView()
-        self.view.setMinimumHeight(260)
+        self.view.setMinimumHeight(120)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(2, 2, 2, 2)
         lay.addLayout(bar)

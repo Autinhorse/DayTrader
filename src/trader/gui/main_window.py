@@ -18,9 +18,11 @@ from PySide6.QtGui import QAction, QCloseEvent
 from PySide6.QtNetwork import QLocalServer
 from PySide6.QtWidgets import (
     QDockWidget,
+    QFrame,
     QLabel,
     QMainWindow,
     QMessageBox,
+    QScrollArea,
     QToolBar,
     QWidget,
 )
@@ -80,7 +82,7 @@ class MainWindow(QMainWindow):
         self.data = DataPanel(project_dir)
         self.replay = ReplayPanel(self.sv)
         self.d_backtest = self._dock(
-            "backtest", "回测", self.backtest, Qt.DockWidgetArea.LeftDockWidgetArea
+            "backtest", "回测", self.backtest, Qt.DockWidgetArea.LeftDockWidgetArea, scroll=False
         )
         self.d_results = self._dock(
             "results", "回测结果", self.results, Qt.DockWidgetArea.BottomDockWidgetArea
@@ -120,10 +122,21 @@ class MainWindow(QMainWindow):
 
     # ---------- 面板 ----------
 
-    def _dock(self, name: str, title: str, w: QWidget, area: Qt.DockWidgetArea) -> QDockWidget:
+    def _dock(
+        self, name: str, title: str, w: QWidget, area: Qt.DockWidgetArea, scroll: bool = True
+    ) -> QDockWidget:
         d = QDockWidget(title, self)
         d.setObjectName(name)
-        d.setWidget(w)
+        if scroll:
+            # 面板内容放进滚动区，最小高度不再由内容决定，分隔条可以拖得很小（超出时出滚动条）。
+            # 叠成标签页的面板取其中最大的最小高度，不包一层的话数据管理面板会把结果区撑得很高。
+            sa = QScrollArea()
+            sa.setWidgetResizable(True)
+            sa.setFrameShape(QFrame.Shape.NoFrame)
+            sa.setWidget(w)
+            d.setWidget(sa)
+        else:
+            d.setWidget(w)
         d.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetMovable
             | QDockWidget.DockWidgetFeature.DockWidgetFloatable
@@ -141,7 +154,9 @@ class MainWindow(QMainWindow):
             self._chart_seq += 1
             name = f"chart_{self._chart_seq}"
         w = ChartWidget(self.sv, config)
-        d = self._dock(name, f"图表 {w.title()}", w, Qt.DockWidgetArea.RightDockWidgetArea)
+        d = self._dock(
+            name, f"图表 {w.title()}", w, Qt.DockWidgetArea.RightDockWidgetArea, scroll=False
+        )
         w.title_changed.connect(lambda t, dock=d: dock.setWindowTitle(f"图表 {t}"))
         d.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         d.destroyed.connect(lambda _o=None, n=name: self.charts.pop(n, None))
@@ -158,7 +173,7 @@ class MainWindow(QMainWindow):
             n += 1
         name = f"replay_chart_{n}"
         w = self.replay.new_chart(config)
-        d = self._dock(name, w.title(), w, Qt.DockWidgetArea.RightDockWidgetArea)
+        d = self._dock(name, w.title(), w, Qt.DockWidgetArea.RightDockWidgetArea, scroll=False)
         w.title_changed.connect(lambda t, dock=d: dock.setWindowTitle(t))
         d.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         d.destroyed.connect(lambda _o=None, k=name: self.replay_charts.pop(k, None))

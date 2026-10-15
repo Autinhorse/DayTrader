@@ -2295,7 +2295,7 @@ dependencies = [
 [package.optional-dependencies]
 live = [
     { name = "ib-async" },
-    { name = "pyside6" },
+    { name = "pyside6-essentials" },
 ]
 research = [
     { name = "jupyterlab" },
@@ -2329,8 +2329,8 @@ requires-dist = [
     { name = "polars" },
     { name = "pyarrow", marker = "extra == 'research'" },
     { name = "pydantic" },
-    { name = "pyside6", marker = "extra == 'live'" },
     { name = "pyside6", marker = "extra == 'research'" },
+    { name = "pyside6-essentials", marker = "extra == 'live'" },
     { name = "pyyaml" },
     { name = "requests", marker = "extra == 'research'" },
 ]

@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -35,7 +36,11 @@ start "DayTrader LIVE {tag}" .venv\\Scripts\\python.exe -m trader.apps.live_app 
 
 def run(*args: str, cwd: Path = ROOT) -> str:
     print("  >", " ".join(args))
-    out = subprocess.run(args, cwd=cwd, capture_output=True, text=True, encoding="utf-8")  # noqa: S603
+    # 不继承研究目录的虚拟环境：发布目录的 uv 只认它自己的 .venv
+    env = {k: v for k, v in os.environ.items() if k != "VIRTUAL_ENV"}
+    out = subprocess.run(  # noqa: S603
+        args, cwd=cwd, capture_output=True, text=True, encoding="utf-8", env=env
+    )
     if out.returncode != 0:
         raise SystemExit(f"失败：{' '.join(args)}\n{out.stdout}{out.stderr}")
     return out.stdout

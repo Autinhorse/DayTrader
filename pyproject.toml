@@ -23,7 +23,7 @@ research = [
 # 实盘版需要的全部额外依赖（发布目录只装 core + live，见 tools/release_live.py），尽量不加
 live = [
     "ib_async",  # IBKR 连接
-    "PySide6",  # 实盘版界面
+    "PySide6-Essentials",  # 实盘版界面（只要 Qt 窗口和网络；不要 WebEngine 等附加模块）
 ]
 
 [project.scripts]

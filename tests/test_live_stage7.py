@@ -423,6 +423,27 @@ def test_git_release_state(tmp_path: Path):
     assert "无法读取" in release_problems(git_state(tmp_path / "missing"))[0]
 
 
+def test_release_dir_files_do_not_make_tree_dirty(tmp_path: Path):
+    """发布目录里生成的 run_live.bat 和 config/live.yaml 被 .gitignore 忽略，不算未提交的改动。"""
+    root = Path(__file__).resolve().parents[1]
+    repo = tmp_path / "repo"
+    (repo / "config").mkdir(parents=True)
+    (repo / ".gitignore").write_text(
+        (root / ".gitignore").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "c1")
+    _git(repo, "tag", "V1")
+    (repo / "run_live.bat").write_text("x", encoding="utf-8")
+    (repo / "config" / "live.yaml").write_text("x", encoding="utf-8")
+    (repo / "runs").mkdir()
+    (repo / "runs" / "x.txt").write_text("x", encoding="utf-8")
+    assert release_problems(git_state(repo)) == []
+
+
 # ---------- 界面 ----------
 
 

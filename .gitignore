@@ -10,3 +10,4 @@ config.json
 *.png
 config/research_gui.ini
 config/live.yaml
+/run_live.bat

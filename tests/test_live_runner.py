@@ -213,8 +213,8 @@ def test_requirements_check_blocks_snapshot_symbol(tmp_path: Path, dataset):
 
 def test_config_safety(tmp_path: Path):
     risk = RiskLimits().model_dump()
-    with pytest.raises(ValueError, match="阶段 6 不支持实盘"):
-        LiveConfig.model_validate({"profile": "live", "risk": risk})
+    with pytest.raises(ValueError, match="live 只允许实盘端口"):
+        LiveConfig.model_validate({"profile": "live", "risk": risk})  # 默认端口 4002
     with pytest.raises(ValueError, match="4001"):
         LiveConfig.model_validate({"profile": "local_paper", "ibkr": {"port": 4001}, "risk": risk})
     del risk["max_daily_loss_usd"]
@@ -230,9 +230,9 @@ def test_shipped_local_paper_config_is_valid():
     assert cfg.profile == "local_paper" and cfg.ibkr.port == 4002 and cfg.feed.grace_ms == 1000
 
 
-def test_cli_refuses_live(monkeypatch, capsys):
+def test_cli_refuses_live_without_confirm_flag(monkeypatch, capsys):
     from trader.apps import live_app
 
-    monkeypatch.setattr("sys.argv", ["trader-live", "--profile", "live", "--confirm-live"])
+    monkeypatch.setattr("sys.argv", ["trader-live", "--profile", "live"])
     assert live_app.main() == 3
-    assert "不支持实盘" in capsys.readouterr().out
+    assert "--confirm-live" in capsys.readouterr().out

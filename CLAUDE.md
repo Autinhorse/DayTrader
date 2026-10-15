@@ -33,6 +33,7 @@ uv run trader-live --profile broker_paper [--start-strategy]   :: IBKR 模拟账
 run_local_paper.bat / run_broker_paper.bat   :: 双击：引擎窗口 + 实盘版界面（--ui）
 uv run trader-live-ui --profile broker_paper   :: 单独打开界面（引擎在 127.0.0.1:8764/8765）
 uv run python tools/paper_smoke.py [--check-only]   :: 模拟账户下单冒烟（1 股 SPY，常规时段）；清单 docs/paper_checklist.md
+uv run python tools/release_live.py [--tag V0.0.x]  :: 实盘发布：标签检出到 ..\DayTrader-live\<标签>，双击其中 run_live.bat；清单 docs/live_checklist.md
 ```
 
 聚合：`trader.core.aggregation.BarAggregator`（增量，回测/实时用）与 `trader.data.aggregate`（向量化，历史/图表用）
@@ -53,7 +54,10 @@ load_run, sweep`，示例 `user/notebooks/`。见 docs/decisions/0006。
 测试用 `tests/fake_ib.py`，永不连接真实 IBKR）；实时 1 秒 bar 由 `trader.data.bar_builder` 生成，
 当天历史 `trader.data.live_history.LiveHistory`；引擎 `start(live=True)` + `push()`。
 落盘与恢复 `trader.oms.journal`；配置 `config/local_paper.yaml`（风控阈值必须全部显式）。
-阶段 6 只允许模拟端口 4002/7497 和 DU 开头的模拟账户，live 配置一律拒绝。
+模拟只允许端口 4002/7497 和 DU 账户；实盘（阶段 7，决策 0008）只允许 4001/7496 和配置里写明的 U 账户，
+另需 --confirm-live、`go_live` 清单、版本标签且无未提交改动、策略源码哈希一致（`LiveRunner.preflight`，连接前检查）。
+半自动：`OrderManager.confirm / reject_signal / expire_confirms`，live 默认 confirm；亏损熔断在 `LiveRunner._check_loss`。
+`config/live.yaml` 不进 git（模板 `config/live.example.yaml`），只放在发布目录里。自动化流程永远不运行 live。
 实盘版界面 `trader.gui.live_window`（独立进程）只通过 `trader.live.control` 的本机端口（JSON 行）和引擎通信，
 不导入引擎（import-linter 检查）；界面关闭不影响交易。
 

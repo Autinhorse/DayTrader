@@ -19,6 +19,15 @@
   才按实际持仓发平仓单。
 - 回报中的异常（迟到成交、无法识别的状态、未知订单的回报）通过 on_system 报告，
   不抛错。
+
+实盘半自动（阶段 7，DESIGN.md 8.6）：
+- confirm_sources 里的来源发出的**开仓**单通过风控后进入 AWAITING_CONFIRM，不发给执行器；
+  减仓、止盈止损、收盘前平仓直接执行（confirm_exits=True 时策略自己的减仓单也要确认）。
+- confirm()：只有 AWAITING_CONFIRM 能转为已确认；重新执行全部风控、暂停检查和价格偏离检查，
+  不通过则 REJECTED。对已经结束的信号再次确认只返回当前状态，不发单（幂等）。
+- reject_signal()：人工拒绝 → REJECTED（operator_reject）；
+  expire_confirms()：超时 → EXPIRED（confirm_timeout）。
+- 等待确认的订单被撤销时直接本地作废，不向执行器发撤单。
 """
 
 from __future__ import annotations
@@ -40,7 +49,9 @@ from trader.core.models import (
 )
 from trader.oms.orders import (
     BrokerUpdate,
+    Cancelled,
     CancelRequested,
+    Expired,
     LocalUpdate,
     Rejected,
     ReplaceRequested,
@@ -111,6 +122,11 @@ class OrderManager:
     commission_log: list[CommissionUpdate] = field(default_factory=list)  # 落盘用
     native_brackets: bool = False
     _notes_seen: dict[str, int] = field(default_factory=dict)
+    # 实盘半自动确认（DESIGN.md 8.6）
+    confirm_sources: set[str] = field(default_factory=set)
+    confirm_exits: bool = False
+    confirm_max_move_pct: float = 0.5  # 确认时最新价相对信号价的最大偏离
+    signal_price: dict[str, float] = field(default_factory=dict)  # 等待确认的订单 → 信号时的最新价
 
     # ---------- 标的归属（DESIGN.md 7.4） ----------
 
@@ -219,6 +235,19 @@ class OrderManager:
         if rej is not None:
             self._apply(Rejected(order.client_order_id, now, rej.rule, rej.detail))
             return order
+        if self._needs_confirm(order, view, exit_order):
+            order.status = OrderStatus.AWAITING_CONFIRM
+            order.status_times[OrderStatus.AWAITING_CONFIRM] = now
+            last = self.portfolio.last_price.get(intent.symbol)
+            if last:
+                self.signal_price[order.client_order_id] = last
+            self._notify(Notice("order", order))
+            return order
+        self._release(order, now)
+        return order
+
+    def _release(self, order: Order, now: int) -> None:
+        """订单进入 SUBMITTED 并（经发件箱）发给执行器。"""
         order.status = OrderStatus.SUBMITTED
         order.status_times[OrderStatus.SUBMITTED] = now
         self._notify(Notice("order", order))
@@ -227,7 +256,67 @@ class OrderManager:
             self._send("bracket", order, None, now)
         else:
             self._send("submit", order, None, now)
+
+    # ---------- 实盘半自动确认（DESIGN.md 8.6） ----------
+
+    def _needs_confirm(self, order: Order, view: RiskView, exit_order: bool | None) -> bool:
+        it = order.intent
+        if it.source not in self.confirm_sources or order.parent_id is not None:
+            return False
+        if it.reason.code in ("eod_flatten", "manual_flatten"):
+            return False
+        exiting = exit_order if exit_order is not None else is_exit(it, view)
+        return self.confirm_exits or not exiting
+
+    def awaiting(self) -> list[Order]:
+        return [o for o in self.orders.values() if o.status == OrderStatus.AWAITING_CONFIRM]
+
+    def confirm(self, client_order_id: str, now: int) -> Order | None:
+        """人工确认。重新执行全部风控；只有 AWAITING_CONFIRM 的订单会被发出（幂等）。"""
+        order = self.orders.get(client_order_id)
+        if order is None or order.status != OrderStatus.AWAITING_CONFIRM:
+            return order
+        it = order.intent
+        view = self.view(now, it.source, exclude=client_order_id)
+        rej = check(it, view, self.limits, count_once=False)
+        halted = self.halt_all_new or it.source in self.halted
+        if rej is None and halted and not is_exit(it, view):
+            why = "已停止新开仓" if self.halt_all_new else f"{it.source} 已暂停"
+            rej = Reject("halted", why + "，信号作废")
+        signal = self.signal_price.pop(client_order_id, None)
+        last = self.portfolio.last_price.get(it.symbol)
+        if rej is None and signal and last:
+            move = abs(last - signal) / signal * 100
+            if move > self.confirm_max_move_pct:
+                rej = Reject(
+                    "confirm_price_move",
+                    f"确认时价格 {last:.2f} 相对信号价 {signal:.2f} 偏离 {move:.2f}%，"
+                    f"超过 {self.confirm_max_move_pct}%",
+                )
+        if rej is not None:
+            self._apply(Rejected(client_order_id, now, rej.rule, rej.detail))
+            return order
+        self._release(order, now)
         return order
+
+    def reject_signal(self, client_order_id: str, now: int, why: str = "人工拒绝") -> Order | None:
+        order = self.orders.get(client_order_id)
+        if order is None or order.status != OrderStatus.AWAITING_CONFIRM:
+            return order
+        self.signal_price.pop(client_order_id, None)
+        self._apply(Rejected(client_order_id, now, "operator_reject", why))
+        return order
+
+    def expire_confirms(self, now: int, timeout_ns: int) -> list[Order]:
+        """超时未确认的信号以 EXPIRED 结束（confirm_timeout）。"""
+        out = []
+        for o in self.awaiting():
+            if now - o.status_times[OrderStatus.AWAITING_CONFIRM] >= timeout_ns:
+                self.signal_price.pop(o.client_order_id, None)
+                o.reject_rule, o.reject_detail = "confirm_timeout", "超时未确认"
+                self._apply(Expired(o.client_order_id, now))
+                out.append(o)
+        return out
 
     def _create_native_children(self, parent: Order, now: int) -> None:
         """原生括号单：保护单与入场单同时创建（数量 = 入场数量），随入场单一起发出。"""
@@ -290,6 +379,10 @@ class OrderManager:
         order = self.orders.get(client_order_id)
         if order is None or order.status.is_terminal or order.status == OrderStatus.PENDING_CANCEL:
             return
+        if order.status == OrderStatus.AWAITING_CONFIRM:  # 券商从没见过：本地作废
+            self.signal_price.pop(client_order_id, None)
+            self._apply(Cancelled(client_order_id, now, "等待确认时撤销"))
+            return
         self._apply(CancelRequested(client_order_id, now))
         self._send("cancel", order, None, now)
 
@@ -326,6 +419,10 @@ class OrderManager:
         )
         if rej is not None:
             return rej
+        if order.status == OrderStatus.AWAITING_CONFIRM:  # 还没发出：直接改内容，等确认
+            order.intent = new_intent
+            self._notify(Notice("order", order))
+            return None
         self._apply(ReplaceRequested(client_order_id, now, new_intent))
         self._send("modify", order, new_intent, now)
         return None

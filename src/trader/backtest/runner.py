@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import hashlib
-import inspect
 import json
 import subprocess
 from collections.abc import Callable
@@ -39,7 +38,7 @@ from trader.data.catalog import Catalog
 from trader.data.history import HistoryService
 from trader.engine.engine import BacktestEngine, EngineConfig, EngineResult
 from trader.indicators.base import load_all
-from trader.strategy.base import get_strategy, load_user_strategies
+from trader.strategy.base import get_strategy, load_user_strategies, source_hash
 
 
 @dataclass
@@ -53,15 +52,6 @@ class BacktestResult:
     trades: pl.DataFrame
     equity: pl.DataFrame
     engine: EngineResult
-
-
-def _source_hash(cls: type) -> str:
-    """策略源代码的哈希（用于复现）。在 notebook 单元格里定义的策略拿不到源文件，记为不可用。"""
-    try:
-        src = inspect.getsource(inspect.getmodule(cls) or cls)
-    except (OSError, TypeError):
-        return "unavailable"
-    return hashlib.sha256(src.encode()).hexdigest()[:16]
 
 
 def _git_commit(root: Path) -> str | None:
@@ -186,7 +176,7 @@ def run_backtest(
             },
         )
         repro = {
-            "strategy_source_sha256": _source_hash(strategy_cls),
+            "strategy_source_sha256": source_hash(strategy_cls),
             "git_commit": _git_commit(project_dir),
             "data_fingerprints": _data_fingerprints(
                 catalog, cal, sorted(set(symbols) & (set(traded) or set(symbols))), cfg

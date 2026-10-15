@@ -2293,6 +2293,10 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+live = [
+    { name = "ib-async" },
+    { name = "pyside6" },
+]
 research = [
     { name = "jupyterlab" },
     { name = "pandas" },
@@ -2319,11 +2323,13 @@ tools = [
 [package.metadata]
 requires-dist = [
     { name = "exchange-calendars" },
+    { name = "ib-async", marker = "extra == 'live'" },
     { name = "jupyterlab", marker = "extra == 'research'" },
     { name = "pandas", marker = "extra == 'research'" },
     { name = "polars" },
     { name = "pyarrow", marker = "extra == 'research'" },
     { name = "pydantic" },
+    { name = "pyside6", marker = "extra == 'live'" },
     { name = "pyside6", marker = "extra == 'research'" },
     { name = "pyyaml" },
     { name = "requests", marker = "extra == 'research'" },

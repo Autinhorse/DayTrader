@@ -1,7 +1,9 @@
-"""实盘版运行器（DESIGN.md 5.5、8.5、9.4、12.3、12.4）。两种模拟方式：
+"""实盘版运行器（DESIGN.md 5.5、8.5、8.6、9.4、12.3、12.4）。三种运行方式：
 
 - local_paper：IBKR 实时行情 + 本地模拟撮合（SimBroker），不向券商发送任何订单（连接用只读模式）；
-- broker_paper：IBKR 实时行情 + IBKR 模拟账户执行（IbkrExecutor，原生括号单），定期与券商对账。
+- broker_paper：IBKR 实时行情 + IBKR 模拟账户执行（IbkrExecutor，原生括号单），定期与券商对账；
+- live（阶段 7）：与 broker_paper 相同的路径，连接实盘端口和实盘账户。策略默认半自动：开仓信号
+  进入“等待确认”，人工在界面上确认后才发出，超时作废。
 
 主循环每 100 毫秒：取本机时间 → 券商回报归约 → 行情源封口 1 秒 bar → 送入引擎并推进到当前时刻 →
 系统事件（断线、行情中断、缺口）暂停相关策略 → 订单和成交落盘 → 落盘成功后发出请求。
@@ -9,9 +11,13 @@
 对账（broker_paper）：每分钟比较本地持仓与券商持仓、券商挂单里有没有不认识的订单；连续两次不一致
 就发 RECONCILE_MISMATCH、暂停策略、等人工处理，不自动修正。人工可以“按券商持仓重置”。
 
-启动检查（任何一项不通过就拒绝启动）：配置合法（风控阈值全部显式、只允许模拟端口）、
-账户号是模拟账户（DU 开头）、本机与 IB 服务器时间偏差在阈值内、按固定顺序完成订阅和补数。
+启动检查（任何一项不通过就拒绝启动，DESIGN.md 12.3）：配置合法（风控阈值全部显式、端口与运行方式
+相符）；live 另外要求 --confirm-live、上线清单全部完成、代码没有未提交改动且有版本标签、
+策略源码哈希与配置登记的一致——这些在连接 IB 之前检查；连接后账户号与运行方式相符（模拟 DU、
+实盘 U）、本机与 IB 服务器时间偏差在阈值内、按固定顺序完成订阅和补数。
 策略启动后默认暂停：必须人工开启（命令行 --start-strategy 或界面按钮），开启前检查行情能力。
+
+亏损熔断：当日盈亏触及 max_daily_loss_usd 时停止新开仓、暂停策略并报警，之后只能人工恢复。
 """
 
 from __future__ import annotations
@@ -25,23 +31,24 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from trader.brokers.ibkr.api import IbApi, SafetyError, check_paper_accounts
+from trader.brokers.ibkr.api import IbApi, SafetyError, check_accounts
 from trader.brokers.ibkr.executor import IbkrExecutor
 from trader.brokers.ibkr.feed import FeedSettings, IbkrFeed
 from trader.brokers.sim.matcher import SimBroker
 from trader.config import Universe
 from trader.core.events import SystemEvent, SystemKind
-from trader.core.models import CommissionUpdate, Order
+from trader.core.models import CommissionUpdate, Order, OrderStatus
 from trader.core.timeutil import NS_PER_DAY, NS_PER_MS, NS_PER_SEC, from_ns, timeframe_ns
 from trader.core.trading_calendar import TradingCalendar
 from trader.data.catalog import Catalog
 from trader.data.live_history import LiveHistory
 from trader.engine.engine import MANUAL, BacktestEngine, EngineConfig
-from trader.live.config import LiveConfig
+from trader.live.config import LiveConfig, go_live_missing
+from trader.live.release import GitState, release_problems
 from trader.oms.journal import Journal, recover_into
 from trader.oms.manager import Notice
 from trader.oms.orders import QueryResult
-from trader.strategy.base import Strategy, get_strategy
+from trader.strategy.base import Strategy, get_strategy, source_hash
 
 LOOP_MS = 100
 
@@ -90,6 +97,12 @@ class LiveRunner:
         3.0,
         0.3,
     )  # 订阅后等待补数的秒数、补数请求间隔（测试改为 0）
+    # 实盘（live）：命令行 --confirm-live；代码目录的 git 状态（入口传入，测试可替换）
+    confirm_live: bool = False
+    git_state: Callable[[], GitState] = lambda: GitState(error="没有提供代码目录的 git 状态")
+    loss_tripped: bool = False
+    loop_ts: int = 0  # 主循环最近一次运行的时间（界面据此判断引擎是否卡住）
+    _signals_seen: set[str] = field(default_factory=set)
 
     @property
     def strategy_id(self) -> str:
@@ -97,19 +110,48 @@ class LiveRunner:
 
     # ---------- 启动 ----------
 
+    def preflight(self) -> list[str]:
+        """连接 IB 之前的检查（live 才有）：返回不通过的原因。"""
+        cfg = self.cfg
+        if not cfg.is_live:
+            return []
+        out = []
+        if not self.confirm_live:
+            out.append("实盘必须加 --confirm-live 参数")
+        out += [f"上线清单未完成：{t}" for t in go_live_missing(cfg)]
+        out += release_problems(self.git_state())
+        if cfg.strategy is not None:
+            try:
+                actual = source_hash(get_strategy(cfg.strategy.name))
+            except KeyError as exc:
+                out.append(f"找不到策略：{exc}")
+            else:
+                if actual != cfg.strategy.source_hash:
+                    registered = cfg.strategy.source_hash or "（空）"
+                    out.append(
+                        f"策略 {cfg.strategy.name} 的源码哈希是 {actual}，配置登记的是 "
+                        f"{registered}；确认策略代码无误后把 {actual} "
+                        "写进 config/live.yaml 的 strategy.source_hash"
+                    )
+        return out
+
     async def startup(self) -> None:
         cfg = self.cfg
-        if cfg.profile not in ("local_paper", "broker_paper"):
-            raise StartupError(f"阶段 6 不支持运行方式 {cfg.profile}")
-        broker = cfg.profile == "broker_paper"
+        live = cfg.is_live
+        problems = self.preflight()
+        if problems:
+            raise StartupError("；".join(problems))
+        broker = cfg.profile in ("broker_paper", "live")
         now = self.now()
         today = self._today(now)
         self._alert(now, "startup", f"{cfg.profile} 启动，交易日 {today}")
-        # 1. 连接（local_paper 只读，不可能下单；broker_paper 可下单）+ 账户检查
-        await self.api.connect(cfg.ibkr.host, cfg.ibkr.port, cfg.ibkr.client_id, not broker)
+        # 1. 连接（local_paper 只读，不可能下单；broker_paper、live 可下单）+ 账户检查
+        await self.api.connect(
+            cfg.ibkr.host, cfg.ibkr.port, cfg.ibkr.client_id, not broker, live=live
+        )
         try:
             accounts = self.api.managed_accounts()
-            check_paper_accounts(accounts)
+            check_accounts(accounts, live)
             if cfg.ibkr.account and cfg.ibkr.account not in accounts:
                 raise SafetyError(f"配置的账户 {cfg.ibkr.account} 不在已登录的账户 {accounts} 里")
             if broker and not cfg.ibkr.account and len(accounts) != 1:
@@ -178,6 +220,10 @@ class LiveRunner:
         e = self.engine
         e.oms.deferred = True
         e.oms.native_brackets = broker
+        if cfg.strategy is not None and cfg.execution == "confirm":
+            e.oms.confirm_sources.add(self.strategy_id)
+            e.oms.confirm_exits = cfg.confirm.confirm_exits
+            e.oms.confirm_max_move_pct = cfg.confirm.max_price_move_pct
         e.oms.on_system = lambda ts, ref, msg: self._alert(ts, "order", msg, None)
         e.notice_listeners.append(self._on_notice)
         e.on_new_symbol = self._on_new_symbol
@@ -205,6 +251,8 @@ class LiveRunner:
             self._comm_saved = len(e.oms.commission_log)
         if self.cfg.strategy is not None:
             self.strategy_cls = get_strategy(self.cfg.strategy.name)
+            mode = "人工确认开仓" if cfg.execution == "confirm" else "自动执行"
+            self._alert(start, "startup", f"策略 {self.cfg.strategy.name} 的执行方式：{mode}")
         # 补数期间实时数据已经在缓冲：先处理掉（策略此时尚未开启），不算作运行中的迟到
         self.step(self.now())
         if self.executor is not None:
@@ -266,6 +314,8 @@ class LiveRunner:
         if reason is not None:
             e.detach_strategy()
             return reason
+        if self.loss_tripped:
+            e.oms.halted.add(self.strategy_id)  # 熔断后开启的策略也只能减仓
         self.strategy_running = True
         self._alert(self.now(), "strategy", f"策略 {spec.name} 已开启")
         return None
@@ -329,6 +379,88 @@ class LiveRunner:
                           outside_rth=e.oms.session.session != "regular")  # fmt: skip
             self._alert(self.now(), "risk", f"人工平仓：{sorted(set(syms))}")
 
+    # ---------- 半自动确认（DESIGN.md 8.6） ----------
+
+    def confirm_signal(self, coid: str) -> tuple[bool, str]:
+        e = self.engine
+        if e is None:
+            return False, "引擎还在启动"
+        before = e.oms.orders.get(coid)
+        was = before.status if before is not None else None
+        order = e.confirm_signal(coid)
+        if order is None:
+            return False, f"没有信号 {coid}"
+        if was != OrderStatus.AWAITING_CONFIRM:
+            return False, f"{coid} 已经是 {order.status.value}，不再发出"
+        if order.status == OrderStatus.REJECTED:
+            return False, f"{coid} 确认时没通过检查（{order.reject_rule}）：{order.reject_detail}"
+        self._alert(self.now(), "signal", f"已确认 {coid}，订单发出", order.intent.symbol)
+        return True, f"已确认 {coid}"
+
+    def reject_signal(self, coid: str) -> tuple[bool, str]:
+        e = self.engine
+        if e is None:
+            return False, "引擎还在启动"
+        before = e.oms.orders.get(coid)
+        was = before.status if before is not None else None
+        order = e.reject_signal(coid)
+        if order is None:
+            return False, f"没有信号 {coid}"
+        if was == OrderStatus.AWAITING_CONFIRM:
+            self._alert(self.now(), "signal", f"已拒绝 {coid}", order.intent.symbol)
+            return True, f"已拒绝 {coid}"
+        return False, f"{coid} 已经是 {order.status.value}"
+
+    def signal_stats(self) -> dict[str, Any]:
+        """信号数、确认数、拒绝数、超时数、确认延迟（秒）：判断能否放开全自动的依据。"""
+        e = self.engine
+        if e is None:
+            return {}
+        sig = [o for o in e.oms.orders.values() if OrderStatus.AWAITING_CONFIRM in o.status_times]
+        delays = sorted(
+            (o.status_times[OrderStatus.SUBMITTED] - o.status_times[OrderStatus.AWAITING_CONFIRM])
+            / NS_PER_SEC
+            for o in sig
+            if OrderStatus.SUBMITTED in o.status_times
+        )
+        rules = [o.reject_rule for o in sig]
+        failed = sum(
+            1
+            for o in sig
+            if o.status == OrderStatus.REJECTED
+            and o.reject_rule not in ("operator_reject", "confirm_timeout")
+        )
+        return {
+            "signals": len(sig),
+            "confirmed": len(delays),
+            "rejected": rules.count("operator_reject"),
+            "expired": rules.count("confirm_timeout"),
+            "failed_recheck": failed,
+            "waiting": sum(1 for o in sig if o.status == OrderStatus.AWAITING_CONFIRM),
+            "delay_median_s": delays[len(delays) // 2] if delays else None,
+            "delay_max_s": delays[-1] if delays else None,
+        }
+
+    def _check_loss(self, now: int) -> None:
+        """亏损熔断（DESIGN.md 8.4）：只触发一次；恢复要人工操作。"""
+        e = self.engine
+        if e is None or self.loss_tripped:
+            return
+        pnl = e.portfolio.equity() - e.oms.session.day_start_equity
+        limit = self.cfg.risk.max_daily_loss_usd
+        if pnl > -limit:
+            return
+        self.loss_tripped = True
+        e.oms.halt_all_new = True
+        self.pause_strategy("亏损熔断")
+        for o in e.oms.awaiting():
+            e.reject_signal(o.client_order_id)
+        detail = (
+            f"亏损熔断：当日盈亏 {pnl:,.0f} 美元，触及上限 {limit:,.0f}；已停止新开仓、暂停策略。"
+            "持仓和保护单保留，是否平仓由你决定"
+        )
+        self._system(SystemEvent(SystemKind.RISK_TRIGGERED, now, detail))
+
     # ---------- 主循环 ----------
 
     async def run(self, until: int | None = None) -> None:
@@ -357,9 +489,13 @@ class LiveRunner:
             e.handle_updates(ex.drain())
         e.push(feed.poll(now))
         e.advance(now)
+        for o in e.expire_signals(self.cfg.confirm.timeout_s * NS_PER_SEC):
+            self._alert(now, "signal", f"{o.client_order_id} 超时未确认，已作废", o.intent.symbol)
+        self._check_loss(now)
         for ev in feed.drain_system():
             self._system(ev)
         self._persist(now)
+        self.loop_ts = now
         if ex is not None:
             ex.pump(now)
             self._changed.update(ex.assigned)
@@ -434,10 +570,11 @@ class LiveRunner:
                 await asyncio.sleep(5)
                 if not self.api.is_connected():
                     try:
+                        cfg = self.cfg
                         await self.api.connect(
-                            self.cfg.ibkr.host, self.cfg.ibkr.port, self.cfg.ibkr.client_id, True
+                            cfg.ibkr.host, cfg.ibkr.port, cfg.ibkr.client_id, True, live=cfg.is_live
                         )
-                        check_paper_accounts(self.api.managed_accounts())
+                        check_accounts(self.api.managed_accounts(), cfg.is_live)
                     except SafetyError:
                         self.api.disconnect()
                         raise
@@ -472,7 +609,19 @@ class LiveRunner:
             asyncio.ensure_future(self.feed.add_symbol(symbol))
 
     def _on_notice(self, n: Notice) -> None:
-        self._changed.add(n.order.client_order_id)
+        o = n.order
+        self._changed.add(o.client_order_id)
+        if o.status == OrderStatus.AWAITING_CONFIRM and o.client_order_id not in self._signals_seen:
+            self._signals_seen.add(o.client_order_id)
+            it = o.intent
+            px = it.limit_price or it.stop_price or "市价"
+            self._alert(
+                self.now(),
+                "SIGNAL",
+                f"待确认：{it.side} {it.qty} {it.symbol} {it.order_type} {px}"
+                f"（{it.reason.code}），{self.cfg.confirm.timeout_s} 秒内确认",
+                it.symbol,
+            )
 
     # ---------- 落盘 ----------
 
@@ -522,6 +671,19 @@ class LiveRunner:
             "strategy_running": self.strategy_running,
             "strategy_paused": self.strategy_id in e.oms.halted,
             "halt_all_new": e.oms.halt_all_new,
+            "loss_tripped": self.loss_tripped,
+            "execution": self.cfg.execution if self.cfg.strategy else None,
+            "loop_ts": self.loop_ts,
+            "signals": [
+                _signal_row(
+                    o,
+                    e.oms.signal_price.get(o.client_order_id),
+                    p.last_price,
+                    self.cfg.confirm.timeout_s * NS_PER_SEC,
+                )
+                for o in e.oms.awaiting()
+            ],
+            "signal_stats": self.signal_stats(),
             "flattening": e.oms.session.flattening,
             "equity": p.equity(),
             "cash": float(p.cash),
@@ -582,6 +744,34 @@ class LiveRunner:
             self.journal.close()
         if self.api.is_connected():
             self.api.disconnect()
+
+
+def _signal_row(
+    o: Order, signal_px: float | None, last: dict[str, float], timeout_ns: int
+) -> dict[str, Any]:
+    """待确认信号卡片的内容（DESIGN.md 8.6）。"""
+    it = o.intent
+    px = float(it.limit_price or it.stop_price or 0) or signal_px or 0.0
+    return {
+        "id": o.client_order_id,
+        "created": o.created_at,
+        "expires": o.status_times[OrderStatus.AWAITING_CONFIRM] + timeout_ns,
+        "source": it.source,
+        "symbol": it.symbol,
+        "side": it.side,
+        "qty": it.qty,
+        "type": it.order_type,
+        "limit": float(it.limit_price) if it.limit_price is not None else None,
+        "stop": float(it.stop_price) if it.stop_price is not None else None,
+        "take_profit": float(it.take_profit) if it.take_profit is not None else None,
+        "stop_loss": float(it.stop_loss) if it.stop_loss is not None else None,
+        "signal_price": signal_px,
+        "last": last.get(it.symbol),
+        "notional": round(px * it.qty, 2),
+        "reason": it.reason.code,
+        "detail": it.reason.text,
+        "context": dict(it.reason.context),
+    }
 
 
 def _order_row(o: Order) -> dict[str, Any]:

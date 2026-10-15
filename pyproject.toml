@@ -20,8 +20,11 @@ research = [
     "pyarrow",  # polars 转 pandas
     "jupyterlab",  # notebook 环境（用户 2026-10-09 确认安装）
 ]
-# 只属于实盘版，尽量不加
-live = []
+# 实盘版需要的全部额外依赖（发布目录只装 core + live，见 tools/release_live.py），尽量不加
+live = [
+    "ib_async",  # IBKR 连接
+    "PySide6",  # 实盘版界面
+]
 
 [project.scripts]
 trader-research = "trader.apps.research_app:main"

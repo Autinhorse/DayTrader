@@ -5,8 +5,11 @@
     uv run trader-live --profile local_paper --minutes 10       # 只运行 10 分钟（试运行）
     uv run trader-live --profile broker_paper --ui              # 同时打开界面（独立进程）
 
-阶段 6：只允许 local_paper 和 broker_paper（IBKR 模拟账户，DU 开头）；live 一律拒绝。
-    uv run trader-live --profile broker_paper                   # IBKR 模拟账户下单
+    uv run trader-live --profile broker_paper                   # IBKR 模拟账户下单（DU 开头）
+    trader-live --profile live --confirm-live --ui              # 实盘（阶段 7）：只在发布目录里运行
+
+实盘只能从 tools/release_live.py 生成的发布目录运行（版本标签、没有未提交改动），启动检查见
+LiveRunner.preflight；策略默认人工确认开仓。
 运行状态每分钟写入 runs/live/<日期>/<profile>/status.json，提醒和告警同时打印在窗口里。
 """
 
@@ -25,6 +28,7 @@ from trader.core.timeutil import NS_PER_MIN, from_ns
 from trader.indicators.base import load_all
 from trader.live.config import ConfigError, load_live_config
 from trader.live.control import ControlServer
+from trader.live.release import git_state
 from trader.live.runner import Alert, LiveRunner, StartupError
 from trader.strategy.base import load_user_strategies
 
@@ -58,6 +62,18 @@ async def _main(args: argparse.Namespace) -> int:
         now,
     )
     runner.on_alert = _print_alert
+    runner.confirm_live = args.confirm_live
+    runner.git_state = lambda: git_state(root)
+    if cfg.is_live:
+        print("=" * 60)
+        print("  实盘：真实资金。策略开仓需要在界面上逐笔确认。")
+        print("=" * 60)
+        problems = runner.preflight()
+        if problems:
+            print("拒绝启动实盘：")
+            for x in problems:
+                print(f"  - {x}")
+            return 3
     control = ControlServer(runner, cfg.control_host, cfg.ui_port)
     try:
         port = await control.start()
@@ -105,16 +121,18 @@ def _launch_ui(profile: str) -> None:
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="DayTrader 实盘版（阶段 6：只允许模拟）")
+    p = argparse.ArgumentParser(description="DayTrader 实盘版")
     p.add_argument("--profile", required=True, choices=["local_paper", "broker_paper", "live"])
     p.add_argument("--start-strategy", action="store_true", help="启动后开启配置里的策略")
     p.add_argument("--force", action="store_true", help="数据有缺口时也开启策略")
     p.add_argument("--minutes", type=float, help="只运行这么多分钟（默认到当天盘后结束）")
     p.add_argument("--ui", action="store_true", help="同时打开实盘版界面（独立窗口）")
-    p.add_argument("--confirm-live", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument(
+        "--confirm-live", action="store_true", help="以 live 运行时必须加，表示确认使用真实资金"
+    )
     args = p.parse_args()
-    if args.profile == "live":
-        print("拒绝启动：阶段 6 不支持实盘（live）；实盘接入在阶段 7。")
+    if args.profile == "live" and not args.confirm_live:
+        print("拒绝启动：实盘（live）必须加 --confirm-live 参数。")
         return 3
     try:
         return asyncio.run(_main(args))

@@ -11,7 +11,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import inspect
 import json
 import sys
 from abc import ABC, abstractmethod
@@ -197,6 +199,18 @@ def register_strategy[S: type[Strategy]](cls: S) -> S:
         raise ValueError(f"策略名 {cls.name!r} 已被 {old.__module__}.{old.__qualname__} 使用")
     _REGISTRY[cls.name] = cls
     return cls
+
+
+def source_hash(cls: type) -> str:
+    """策略源代码的哈希（回测用于复现，实盘启动时与配置登记的值核对）。
+
+    在 notebook 单元格里定义的策略拿不到源文件，记为 unavailable。
+    """
+    try:
+        src = inspect.getsource(inspect.getmodule(cls) or cls)
+    except (OSError, TypeError):
+        return "unavailable"
+    return hashlib.sha256(src.encode()).hexdigest()[:16]
 
 
 def get_strategy(name: str) -> type[Strategy]:

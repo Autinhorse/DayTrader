@@ -9,3 +9,4 @@ config.json
 *.egg-info/
 *.png
 config/research_gui.ini
+config/live.yaml

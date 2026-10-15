@@ -58,6 +58,10 @@ async def execute(runner: LiveRunner, cmd: dict[str, Any]) -> tuple[bool, str]:
     if name == "flatten_all":
         runner.flatten_all()
         return True, "已开始平仓（先撤单，确认后平仓）"
+    if name == "confirm_signal":
+        return runner.confirm_signal(str(cmd.get("id", "")))
+    if name == "reject_signal":
+        return runner.reject_signal(str(cmd.get("id", "")))
     if name == "cancel_order":
         coid = str(cmd.get("id", ""))
         if coid not in e.oms.orders:

@@ -3,8 +3,10 @@
 行情源和执行器只通过 IbApi 使用 IBKR；真实实现 IbAsyncApi 包装 ib_async，测试用假的实现回放消息。
 这样自动化测试永远不连接 IBKR。
 
-安全规则（阶段 6）：只允许模拟端口（Gateway 4002、TWS 7497），
-连接后账户号必须以 DU 开头（模拟账户）。
+安全规则：
+- 默认（模拟）：只允许模拟端口（Gateway 4002、TWS 7497），连接后账户号必须以 DU 开头。
+- 实盘（阶段 7，live=True，只由 trader-live --profile live --confirm-live 传入）：只允许实盘端口
+  （Gateway 4001、TWS 7496），账户号必须以 U 开头；模拟端口和模拟账户反而拒绝，两边不能混用。
 """
 
 from __future__ import annotations
@@ -26,19 +28,35 @@ class SafetyError(RuntimeError):
     """违反实盘安全规则：拒绝连接或立即断开。"""
 
 
-def check_paper_port(port: int) -> None:
-    if port not in PAPER_PORTS:
+def check_port(port: int, live: bool = False) -> None:
+    if live:
+        if port not in LIVE_PORTS:
+            raise SafetyError(f"实盘只允许实盘端口 {sorted(LIVE_PORTS)}，配置的是 {port}")
+    elif port not in PAPER_PORTS:
         raise SafetyError(
-            f"端口 {port} 不是模拟账户端口 {sorted(PAPER_PORTS)}；阶段 6 只允许连接模拟账户"
+            f"端口 {port} 不是模拟账户端口 {sorted(PAPER_PORTS)}；模拟运行只允许连接模拟账户"
         )
 
 
-def check_paper_accounts(accounts: list[str]) -> None:
+def check_accounts(accounts: list[str], live: bool = False) -> None:
     if not accounts:
-        raise SafetyError("连接后没有拿到账户号，无法确认是模拟账户")
+        raise SafetyError("连接后没有拿到账户号，无法确认账户类型")
+    if live:
+        bad = [a for a in accounts if not a.startswith("U")]
+        if bad:
+            raise SafetyError(f"账户 {bad} 不是实盘账户（实盘账户以 U 开头），已断开")
+        return
     bad = [a for a in accounts if not a.startswith("DU")]
     if bad:
         raise SafetyError(f"账户 {bad} 不是模拟账户（模拟账户以 DU 开头），已断开")
+
+
+def check_paper_port(port: int) -> None:
+    check_port(port, live=False)
+
+
+def check_paper_accounts(accounts: list[str]) -> None:
+    check_accounts(accounts, live=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,7 +134,9 @@ class BrokerPosition:
 
 
 class IbApi(Protocol):
-    async def connect(self, host: str, port: int, client_id: int, readonly: bool) -> None: ...
+    async def connect(
+        self, host: str, port: int, client_id: int, readonly: bool, live: bool = False
+    ) -> None: ...
     def disconnect(self) -> None: ...
     def is_connected(self) -> bool: ...
     def managed_accounts(self) -> list[str]: ...
@@ -167,10 +187,12 @@ class IbAsyncApi:
         self._orders: dict[int, Any] = {}
         self._hooked = False
 
-    async def connect(self, host: str, port: int, client_id: int, readonly: bool) -> None:
+    async def connect(
+        self, host: str, port: int, client_id: int, readonly: bool, live: bool = False
+    ) -> None:
         from ib_async.ib import StartupFetch
 
-        check_paper_port(port)
+        check_port(port, live)  # 连接之前检查：端口不对就根本不连
         fetch = (
             StartupFetch(0)
             if readonly

@@ -111,7 +111,7 @@ def test_project_dir_found_from_subdirectory(tmp_path, monkeypatch):
 
 def test_strategy_defined_without_source_file_can_run():
     """在 notebook 单元格里定义的策略拿不到源文件：源码哈希记为不可用，回测照常运行。"""
-    from trader.backtest.runner import _source_hash
+    from trader.strategy.base import source_hash as _source_hash
 
     ns: dict = {}
     exec("class X:\n    pass\n", ns)  # noqa: S102

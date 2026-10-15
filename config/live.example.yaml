@@ -1,0 +1,66 @@
+# 实盘配置模板（DESIGN.md 12.2、12.3；阶段 7）。
+# 发布脚本 tools/release_live.py 把它复制成发布目录里的 config/live.yaml（不进 git）。
+# 在发布目录里修改 config/live.yaml，不要在研究目录里放真实的实盘配置。
+# 启动：双击发布目录里的 run_live.bat（= trader-live --profile live --confirm-live --ui）
+# 下面每一项都要按实际情况填写；任何一项不满足，程序拒绝启动并说明原因。
+profile: live
+
+ibkr:
+  host: 127.0.0.1
+  port: 4001          # 4001 = IB Gateway 实盘；7496 = TWS 实盘。模拟端口一律拒绝
+  client_id: 31       # 与 local_paper（21）、broker_paper（22）分开
+  account: U0000000   # 必填：你的实盘账户号（U 开头）。以后换成资金有限的子账户时只改这里
+
+feed:
+  tick_limit: 5       # 账户的逐笔成交并发额度（与模拟账户共用，不要同时运行 broker_paper）
+  grace_ms: 1000
+  watchdog_regular_s: 30
+  watchdog_extended_s: 600
+  record: true
+
+symbols: []           # 空 = universe.yaml 全部
+
+# 策略。启动后默认暂停，要在界面上点“开启”。
+strategy:
+  name: orb_breakout
+  params: {symbol: NVDA}
+  # execution 不写 = confirm：每个开仓信号都要在界面上确认，15 秒不确认作废。
+  # 跑满约定的交易日、审阅统计之后，才把这一行改成 execution: auto（阶段 8）。
+  # source_hash：启动时与策略源码核对。第一次启动会报错并告诉你当前的哈希，
+  # 确认策略代码就是你审阅过的版本后，把那个值填在这里。
+  source_hash: ""
+
+confirm:
+  timeout_s: 15             # 超过这么久没确认，信号作废
+  max_price_move_pct: 0.5   # 确认时价格相对信号价偏离超过 0.5%，信号作废
+  confirm_exits: false      # 策略自己的减仓单是否也要确认（止损、收盘前平仓始终直接执行）
+
+session: extended
+trade_extended: false
+hold_post: false
+initial_cash: 100000  # 风控按这个规模计算
+
+# 风控阈值必须全部显式填写（DESIGN.md 12.3），缺一项拒绝启动。实盘开始时用最小仓位。
+risk:
+  max_order_qty: 100
+  max_order_usd: 5000
+  max_position_usd: 5000
+  max_gross_exposure_usd: 10000
+  max_daily_loss_usd: 300
+  max_orders_per_min: 5
+  price_protection_pct: 1.0
+  allow_short: false
+  no_open_first_min: 0
+  no_open_before_flatten_min: 10
+  duplicate_window_s: 2
+  max_data_age_s: 30
+  flatten_before_close_min: 5
+
+max_clock_skew_ms: 1000
+
+# 上线清单（DESIGN.md 12.3 第 8 项）：每一项亲自确认后改成 true，缺一项拒绝启动。
+go_live:
+  gateway_precautions: false   # IB Gateway → Configure → Settings → API → Precautions 里设置了单笔上限
+  account_limit: false         # 实盘账户的资金上限已确认（以后改为资金有限的子账户）
+  broker_paper_5_days: false   # broker_paper 连续运行 5 个交易日没有未处理的异常
+  strategy_reviewed: false     # 策略完成回测、样本外、回放、模拟盘各步并记录在策略说明里

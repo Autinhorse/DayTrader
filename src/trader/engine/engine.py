@@ -492,6 +492,23 @@ class BacktestEngine:
         self.oms.cancel(client_order_id, self.clock.now())
         self._deliver()
 
+    # ---------- 实盘半自动确认（DESIGN.md 8.6） ----------
+
+    def confirm_signal(self, client_order_id: str) -> Order | None:
+        order = self.oms.confirm(client_order_id, self.clock.now())
+        self._deliver()
+        return order
+
+    def reject_signal(self, client_order_id: str) -> Order | None:
+        order = self.oms.reject_signal(client_order_id, self.clock.now())
+        self._deliver()
+        return order
+
+    def expire_signals(self, timeout_ns: int) -> list[Order]:
+        out = self.oms.expire_confirms(self.clock.now(), timeout_ns)
+        self._deliver()
+        return out
+
     def _step(self, now: int, batch: list[BarEvent]) -> None:
         # 1. 撮合
         for ev in batch:

@@ -2,7 +2,9 @@
 
 界面只显示引擎推送的状态、把按钮变成命令发回去；关掉界面不影响交易，重新打开即可看到当前状态。
 - 顶部横幅按运行方式着色：本地模拟（蓝）、IBKR 模拟账户（橙）、实盘（红）。
-- 心跳：超过 5 秒没有收到引擎状态就显示“引擎无响应”。
+- 心跳：超过 5 秒没有收到引擎状态，或引擎主循环超过 5 秒没有运行，就显示“引擎无响应”并弹出通知。
+- 待确认信号（阶段 7 半自动）：策略的开仓信号列在“待确认信号”里，显示剩余秒数；
+  确认 / 拒绝。有新信号时窗口提到最前、响一声并弹出通知。
 - 策略：开启 / 暂停（只能减仓）/ 停止（撤单，持仓转手动）。
 - 四个风控按钮：停止新开仓、撤销全部挂单、全部平仓、停止全部策略；另有立即对账、按券商持仓重置。
 - 手动下单与策略订单走同一条路径（风控、落盘）。会改变持仓或挂单的操作都先确认。
@@ -50,6 +52,7 @@ PROFILE_STYLE = {
 }
 IMPORTANT = {
     "CONNECTION_LOST", "FEED_INTERRUPTED", "FEED_DEGRADED", "RECONCILE_MISMATCH", "risk",
+    "RISK_TRIGGERED", "SIGNAL",
 }  # fmt: skip
 HEARTBEAT_S = 5.0
 
@@ -58,6 +61,14 @@ ORDER_COLS = [
     ("limit", "限价"), ("stop", "止损价"), ("filled", "已成交"), ("avg", "均价"),
     ("status", "状态"),
     ("role", "角色"), ("source", "来源"), ("reason", "原因"), ("reject", "拒绝原因"),
+]  # fmt: skip
+
+
+SIGNAL_COLS = [
+    ("left", "剩余秒"), ("symbol", "标的"), ("side", "方向"), ("qty", "数量"), ("type", "类型"),
+    ("price", "价格"), ("take_profit", "止盈"), ("stop_loss", "止损"), ("notional", "预估金额"),
+    ("last", "最新价"), ("reason", "原因"), ("context", "指标"), ("time", "信号时间"),
+    ("id", "订单号"),
 ]  # fmt: skip
 
 
@@ -79,7 +90,8 @@ class LiveWindow(QMainWindow):
         super().__init__()
         self.profile, self.host, self.port = profile, host, port
         color, title = PROFILE_STYLE.get(profile, ("#424242", profile))
-        self.setWindowTitle(f"DayTrader 实盘版 — {title}")
+        prefix = "【实盘 真实资金】" if profile == "live" else ""
+        self.setWindowTitle(f"{prefix}DayTrader 实盘版 — {title}")
         self.resize(1400, 860)
         self._clock = WallClock(lambda _ev: None)
         self.status: dict[str, Any] = {}
@@ -89,6 +101,8 @@ class LiveWindow(QMainWindow):
         self.sent: list[dict[str, Any]] = []  # 发出的命令（测试用）
         self.confirm: Callable[[str], bool] = self._confirm
         self.notify: Callable[[str, str], None] = self._notify
+        self._signal_ids: set[str] = set()
+        self._heartbeat_warned = False
 
         central = QWidget()
         lay = QVBoxLayout(central)
@@ -108,6 +122,7 @@ class LiveWindow(QMainWindow):
         row.addWidget(self._risk_box())
         row.addWidget(self._order_box())
         lay.addLayout(row)
+        lay.addWidget(self._signal_box())
         self.positions = FrameTable()
         self.positions.doubleClicked.connect(self._fill_close_form)
         lay.addWidget(QLabel("持仓（双击填入平仓单）"))
@@ -225,6 +240,40 @@ class LiveWindow(QMainWindow):
         ):
             g.addWidget(b, i // 2, i % 2)
         return box
+
+    def _signal_box(self) -> QGroupBox:
+        self.signal_group = box = QGroupBox("待确认信号（无）")
+        v = QVBoxLayout(box)
+        self.signals = FrameTable()
+        self.signals.setMaximumHeight(130)
+        v.addWidget(self.signals)
+        h = QHBoxLayout()
+        self.btn_confirm = QPushButton("确认（发出订单）")
+        self.btn_confirm.setStyleSheet("background:#2e7d32; color:white; font-weight:bold;")
+        self.btn_confirm.clicked.connect(lambda: self._answer("confirm_signal"))
+        self.btn_reject = QPushButton("拒绝")
+        self.btn_reject.clicked.connect(lambda: self._answer("reject_signal"))
+        self.signal_stats = QLabel("")
+        h.addWidget(self.btn_confirm)
+        h.addWidget(self.btn_reject)
+        h.addWidget(self.signal_stats, 1)
+        v.addLayout(h)
+        return box
+
+    def selected_signals(self) -> list[str]:
+        """选中的信号；没有选中而只有一条信号时就是那一条。"""
+        ids = {r["id"] for i in self.signals.selectedIndexes() if (r := self.signals.row_at(i))}
+        if not ids and len(self._signal_ids) == 1:
+            ids = set(self._signal_ids)
+        return sorted(ids)
+
+    def _answer(self, cmd: str) -> None:
+        ids = self.selected_signals()
+        if not ids:
+            self.statusBar().showMessage("先在“待确认信号”里选中一条")
+            return
+        for coid in ids:
+            self.send(cmd, id=coid)
 
     def _order_box(self) -> QGroupBox:
         box = QGroupBox("手动下单")
@@ -344,11 +393,25 @@ class LiveWindow(QMainWindow):
                 f"正在连接引擎 127.0.0.1:{self.port}…（引擎未启动时先运行 trader-live）"
             )
             self.health.setStyleSheet("color:#b71c1c; font-size:13px; padding:2px;")
-        elif age > HEARTBEAT_S:
-            self.health.setText(f"引擎无响应：{age:.0f} 秒没有收到状态")
-            self.health.setStyleSheet(
-                "background:#b71c1c; color:white; font-size:13px; padding:2px;"
-            )
+        else:
+            loop = self.status.get("loop_ts") or 0
+            loop_age = self._clock.now() / 1e9 - loop / 1e9 if loop else 0.0
+            if age > HEARTBEAT_S or loop_age > HEARTBEAT_S:
+                what = (
+                    f"{age:.0f} 秒没有收到状态"
+                    if age > HEARTBEAT_S
+                    else f"主循环 {loop_age:.0f} 秒没有运行"
+                )
+                self.health.setText(f"引擎无响应：{what}")
+                self.health.setStyleSheet(
+                    "background:#b71c1c; color:white; font-size:13px; padding:2px;"
+                )
+                if not self._heartbeat_warned:
+                    self._heartbeat_warned = True
+                    self.notify("DayTrader 引擎无响应", what)
+            else:
+                self._heartbeat_warned = False
+        self._show_signals()
 
     def _read(self) -> None:
         self._buf += bytes(self.sock.readAll().data())
@@ -394,6 +457,8 @@ class LiveWindow(QMainWindow):
             problems.append(f"数据缺口 {_short(st['gaps'])}")
         if st.get("mismatch"):
             problems.append(f"对账不一致 {list(st['mismatch'])}")
+        if st.get("loss_tripped"):
+            problems.append("亏损熔断（已停止新开仓）")
         session = {"pre": "盘前", "regular": "常规时段", "post": "盘后", None: "休市"}.get(
             st.get("session"), str(st.get("session"))
         )
@@ -415,6 +480,8 @@ class LiveWindow(QMainWindow):
             f"手续费 {st.get('commission', 0):,.2f}　待发请求 {st.get('queued', 0)}"
         )
         name = st.get("strategy") or "（配置里没有策略）"
+        if st.get("strategy"):
+            name += "（人工确认开仓）" if st.get("execution") == "confirm" else "（自动执行）"
         if not st.get("strategy_running"):
             state = "未开启"
         elif st.get("strategy_paused"):
@@ -435,6 +502,53 @@ class LiveWindow(QMainWindow):
             if cur:
                 self.o_symbol.setCurrentText(cur)
         self._tables(st)
+        self._show_signals()
+
+    def _show_signals(self) -> None:
+        """待确认信号（每秒刷新一次剩余秒数）。新信号出现时把窗口提到最前并响一声。"""
+        st = self.status
+        rows = st.get("signals") or []
+        now = self._clock.now()
+        shown = []
+        for r in rows:
+            ctx = r.get("context") or {}
+            shown.append(
+                {
+                    **r,
+                    "left": max(0, int((r.get("expires", 0) - now) / 1e9)),
+                    "price": r.get("limit") or r.get("stop") or "市价",
+                    "context": "，".join(
+                        f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}"
+                        for k, v in ctx.items()
+                    ),
+                    "time": _time(r.get("created")),
+                }
+            )
+        self._set("signals", self.signals, shown, SIGNAL_COLS)
+        ids = {r["id"] for r in rows}
+        new = ids - self._signal_ids
+        self._signal_ids = ids
+        n = len(ids)
+        self.signal_group.setTitle(f"待确认信号（{n} 条）" if n else "待确认信号（无）")
+        self.signal_group.setStyleSheet(
+            "QGroupBox { border: 3px solid #b71c1c; font-weight:bold; color:#b71c1c; }" if n else ""
+        )
+        self.btn_confirm.setEnabled(bool(n))
+        self.btn_reject.setEnabled(bool(n))
+        stats = st.get("signal_stats") or {}
+        if stats.get("signals"):
+            med = stats.get("delay_median_s")
+            self.signal_stats.setText(
+                f"今日信号 {stats['signals']}：确认 {stats['confirmed']}，"
+                f"拒绝 {stats['rejected']}，超时 {stats['expired']}，"
+                f"复检未通过 {stats['failed_recheck']}"
+                + (f"；确认用时中位数 {med:.1f} 秒" if med is not None else "")
+            )
+        if new:
+            self.showNormal()
+            self.raise_()
+            self.activateWindow()
+            QApplication.beep()
 
     def _set(
         self,

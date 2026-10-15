@@ -14,7 +14,7 @@ from trader.brokers.ibkr.api import (
     HistBar,
     OrderSpec,
     Snapshot,
-    check_paper_port,
+    check_port,
 )
 from trader.data.bar_builder import TradeTick
 
@@ -25,6 +25,7 @@ class FakeIb:
         self.connected = False
         self.port: int | None = None
         self.readonly: bool | None = None
+        self.live: bool | None = None
         self.clock: Callable[[], int] = lambda: 0
         self.server_skew_ns = server_skew_ns
         self.known: set[str] | None = None  # None：全部可识别
@@ -49,9 +50,11 @@ class FakeIb:
         self._disc: list[Callable[[], None]] = []
 
     # 连接
-    async def connect(self, host: str, port: int, client_id: int, readonly: bool) -> None:
-        check_paper_port(port)
-        self.connected, self.port, self.readonly = True, port, readonly
+    async def connect(
+        self, host: str, port: int, client_id: int, readonly: bool, live: bool = False
+    ) -> None:
+        check_port(port, live)
+        self.connected, self.port, self.readonly, self.live = True, port, readonly, live
 
     def disconnect(self) -> None:
         self.connected = False

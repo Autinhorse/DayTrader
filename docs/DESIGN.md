@@ -132,6 +132,7 @@ trader/
       ibkr/        # IBKR 行情源与执行器（仅实盘版可导入）
     backtest/      # 回测运行器、统计、参数扫描
     research/      # notebook 接口（仅研究版可导入）
+    analytics/     # 日内波动报表等研究分析（仅研究版，决策 0009）
     gui/           # PySide6 界面（研究版；实盘版界面在阶段 6 加入）
     apps/
       research_app.py   # 入口：trader-research
@@ -154,6 +155,7 @@ trader/
 - `user/strategies` 只能导入 `trader.strategy`、`trader.indicators`、`trader.core`。
 - `brokers.ibkr` 不被 `backtest`、`research`、`research_app` 导入。
 - `research` 不被 `live_app` 导入。
+- `analytics` 只依赖 `core` 和 `data`；实盘、引擎、交易相关模块不导入它（决策 0009）。
 
 ## 4. 核心数据模型与事件
 
@@ -842,6 +844,10 @@ res.open_in_ui()                                                      # 在界�
 ```
 
 Notebook 接口是补充手段，用于界面没有覆盖的自由分析；日常的回测、对比和复盘都在界面完成。接口要稳定，返回值一律是 DataFrame 或简单对象。
+
+### 10.8 日内波动报表（决策 0009）
+
+研究工具，不属于开发阶段。输入一组证券和日期范围，计算每日的幅度、形态、路程、摆动（ZigZag，阈值为 ATR 倍数）指标，按证券取中位数，在本批证券中做百分位打分（活跃度、震荡度、摆动价值、稳定性）。规范：`docs/intraday_volatility_report_spec.md`；代码 `trader.analytics`（`build_report(tickers, start, end, params)`）；notebook `user/notebooks/日内波动报表.ipynb`。
 
 ### 10.7 研究工作流界面
 

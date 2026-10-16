@@ -87,7 +87,7 @@ type = "forbidden"
 source_modules = ["trader.core"]
 forbidden_modules = [
     "trader.data", "trader.indicators", "trader.strategy", "trader.oms", "trader.brokers",
-    "trader.backtest", "trader.research", "trader.gui", "trader.apps",
+    "trader.backtest", "trader.research", "trader.analytics", "trader.gui", "trader.apps",
 ]
 
 [[tool.importlinter.contracts]]
@@ -96,7 +96,7 @@ type = "forbidden"
 source_modules = ["trader.indicators"]
 forbidden_modules = [
     "trader.data", "trader.strategy", "trader.oms", "trader.brokers",
-    "trader.backtest", "trader.research", "trader.gui", "trader.apps",
+    "trader.backtest", "trader.research", "trader.analytics", "trader.gui", "trader.apps",
 ]
 
 [[tool.importlinter.contracts]]
@@ -105,7 +105,7 @@ type = "forbidden"
 source_modules = ["trader.strategy"]
 forbidden_modules = [
     "trader.data", "trader.oms", "trader.brokers",
-    "trader.backtest", "trader.research", "trader.gui", "trader.apps",
+    "trader.backtest", "trader.research", "trader.analytics", "trader.gui", "trader.apps",
 ]
 
 [[tool.importlinter.contracts]]
@@ -114,7 +114,7 @@ type = "forbidden"
 source_modules = ["trader.oms"]
 forbidden_modules = [
     "trader.data", "trader.indicators", "trader.strategy", "trader.brokers",
-    "trader.backtest", "trader.research", "trader.gui", "trader.apps",
+    "trader.backtest", "trader.research", "trader.analytics", "trader.gui", "trader.apps",
 ]
 
 [[tool.importlinter.contracts]]
@@ -127,14 +127,16 @@ forbidden_modules = ["trader.brokers.ibkr"]
 name = "实盘版入口不导入研究接口和下载器"
 type = "forbidden"
 source_modules = ["trader.apps.live_app"]
-forbidden_modules = ["trader.research", "trader.data.massive", "trader.data.download", "trader.cli"]
+forbidden_modules = [
+    "trader.research", "trader.analytics", "trader.data.massive", "trader.data.download", "trader.cli",
+]
 
 [[tool.importlinter.contracts]]
 name = "引擎不导入 IBKR、研究接口、下载器和应用入口"
 type = "forbidden"
 source_modules = ["trader.engine"]
 forbidden_modules = [
-    "trader.brokers.ibkr", "trader.research", "trader.gui", "trader.apps",
+    "trader.brokers.ibkr", "trader.research", "trader.analytics", "trader.gui", "trader.apps",
     "trader.backtest", "trader.data.massive", "trader.data.download",
 ]
 
@@ -152,8 +154,8 @@ name = "实盘运行器不导入研究接口、下载器、界面和回测"
 type = "forbidden"
 source_modules = ["trader.live"]
 forbidden_modules = [
-    "trader.research", "trader.data.massive", "trader.data.download", "trader.gui",
-    "trader.backtest", "trader.cli",
+    "trader.research", "trader.analytics", "trader.data.massive", "trader.data.download",
+    "trader.gui", "trader.backtest", "trader.cli",
 ]
 
 [[tool.importlinter.contracts]]
@@ -163,4 +165,13 @@ source_modules = ["trader.gui.live_window", "trader.apps.live_ui"]
 forbidden_modules = [
     "trader.engine", "trader.live.runner", "trader.live.control", "trader.brokers.ibkr.executor",
     "trader.brokers.ibkr.feed", "trader.research", "trader.backtest",
+]
+
+[[tool.importlinter.contracts]]
+name = "日内波动报表只属于研究侧：只用数据层，不碰交易和界面（决策 0009）"
+type = "forbidden"
+source_modules = ["trader.analytics"]
+forbidden_modules = [
+    "trader.brokers", "trader.engine", "trader.live", "trader.oms", "trader.strategy",
+    "trader.backtest", "trader.research", "trader.gui", "trader.apps", "trader.cli",
 ]

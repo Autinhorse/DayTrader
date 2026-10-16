@@ -327,6 +327,11 @@ def test_reconcile_mismatch_pauses_and_resync(tmp_path: Path, dataset):
         assert not any(a.kind == "RECONCILE_MISMATCH" for a in r.alerts)  # 第一次只记下
         await r.reconcile()
         assert any(a.kind == "RECONCILE_MISMATCH" for a in r.alerts)
+        # 一直不一致：不再每次对账都报警（状态里照样有 mismatch）
+        await r.reconcile()
+        await r.reconcile()
+        assert sum(a.kind == "RECONCILE_MISMATCH" for a in r.alerts) == 1
+        assert "BBB" in r.status()["mismatch"]
         # 人工按券商持仓重置
         r.resync_to_broker({"BBB": (100, 50.0)})
         assert r.positions() == {"BBB": 100}

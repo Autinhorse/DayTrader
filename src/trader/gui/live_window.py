@@ -55,6 +55,10 @@ IMPORTANT = {
     "CONNECTION_LOST", "FEED_INTERRUPTED", "FEED_DEGRADED", "RECONCILE_MISMATCH", "risk",
     "RISK_TRIGGERED", "SIGNAL",
 }  # fmt: skip
+# 弹 Windows 通知的告警：只有需要人处理的。行情中断、补数等只在界面里标红（2026-10-16 模拟测试：
+# 行情中断/恢复反复弹通知，太吵）。同一类、同一标的 NOTIFY_REPEAT_S 秒内只弹一次（待确认信号除外）
+NOTIFY = {"CONNECTION_LOST", "RECONCILE_MISMATCH", "RISK_TRIGGERED", "SIGNAL"}
+NOTIFY_REPEAT_S = 600.0
 HEARTBEAT_S = 5.0
 
 ORDER_COLS = [
@@ -132,6 +136,7 @@ class LiveWindow(QMainWindow):
         self.notify: Callable[[str, str], None] = self._notify
         self._signal_ids: set[str] = set()
         self._heartbeat_warned = False
+        self._notified: dict[tuple[str, str], float] = {}
 
         central = QWidget()
         lay = QVBoxLayout(central)
@@ -146,6 +151,14 @@ class LiveWindow(QMainWindow):
         self.summary = QLabel("")
         self.summary.setStyleSheet("font-size:13px; padding:2px;")
         lay.addWidget(self.summary)
+        # 对账不一致单独一行红底，不和"数据缺口"等提示挤在一起
+        self.mismatch = QLabel("")
+        self.mismatch.setWordWrap(True)
+        self.mismatch.setStyleSheet(
+            "background:#b71c1c; color:white; font-size:14px; font-weight:bold; padding:6px;"
+        )
+        self.mismatch.hide()
+        lay.addWidget(self.mismatch)
         row = QHBoxLayout()
         row.addWidget(self._strategy_box())
         row.addWidget(self._risk_box())
@@ -479,9 +492,15 @@ class LiveWindow(QMainWindow):
         self.alerts.insertItem(0, f"{_time(a.get('ts'))} {a.get('kind')}{sym} {a.get('detail')}")
         if self.alerts.count() > 500:
             self.alerts.takeItem(500)
-        if a.get("kind") in IMPORTANT:
+        kind = str(a.get("kind"))
+        if kind in IMPORTANT:
             self.alerts.item(0).setForeground(Qt.GlobalColor.red)
-            self.notify(f"DayTrader {a.get('kind')}", f"{sym} {a.get('detail')}".strip())
+        if kind in NOTIFY:
+            key = (kind, str(a.get("symbol") or ""))
+            now = self._clock.now() / 1e9
+            if kind == "SIGNAL" or now - self._notified.get(key, -1e18) >= NOTIFY_REPEAT_S:
+                self._notified[key] = now
+                self.notify(f"DayTrader {kind}", f"{sym} {a.get('detail')}".strip())
 
     def apply_status(self, st: dict[str, Any]) -> None:
         self.status, self.last_status_at = st, self._clock.now() / 1e9
@@ -499,6 +518,15 @@ class LiveWindow(QMainWindow):
             problems.append(f"数据缺口 {_short(st['gaps'])}")
         if st.get("mismatch"):
             problems.append(f"对账不一致 {list(st['mismatch'])}")
+            lines = "；".join(f"{k}：{v}" for k, v in st["mismatch"].items())
+            self.mismatch.setText(
+                f"⚠ 对账不一致　{lines}\n"
+                "处理：在券商那边（手机 / TWS）核实；确认以券商为准后"
+                "点“按券商持仓重置”，再点“立即对账”"
+            )
+            self.mismatch.show()
+        else:
+            self.mismatch.hide()
         if st.get("loss_tripped"):
             problems.append("亏损熔断（已停止新开仓）")
         session = {"pre": "盘前", "regular": "常规时段", "post": "盘后", None: "休市"}.get(

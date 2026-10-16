@@ -92,6 +92,7 @@ class LiveRunner:
     account: str = ""
     _mismatch: dict[str, str] = field(default_factory=dict)  # 上一次对账发现的不一致
     _last_reconcile: int = 0
+    _mismatch_alerted: dict[str, str] = field(default_factory=dict)
     _tasks: set[asyncio.Future] = field(default_factory=set)
     feed_timing: tuple[float, float] = (
         3.0,
@@ -546,8 +547,11 @@ class LiveRunner:
                 found[f"order:{oid}"] = f"券商有不认识的挂单 {st.symbol}（orderRef={st.order_ref}）"
         confirmed = {k: v for k, v in found.items() if self._mismatch.get(k) == v}
         self._mismatch = found
-        if confirmed:
-            detail = "；".join(f"{k}: {v}" for k, v in confirmed.items())
+        # 只在新出现或内容变化时报警一次；一直不一致时状态里照样有 mismatch，界面一直显示
+        new = {k: v for k, v in confirmed.items() if self._mismatch_alerted.get(k) != v}
+        self._mismatch_alerted = confirmed
+        if new:
+            detail = "；".join(f"{k}: {v}" for k, v in new.items())
             self._system(SystemEvent(SystemKind.RECONCILE_MISMATCH, self.now(), detail))
         return found
 

@@ -165,7 +165,20 @@ def test_live_window(qtbot):
     w.handle({"type": "alert", "ts": 1, "kind": "RECONCILE_MISMATCH", "detail": "AAA 不一致"})
     w.handle({"type": "alert", "ts": 1, "kind": "startup", "detail": "启动完成"})
     assert notes == [("DayTrader RECONCILE_MISMATCH", "AAA 不一致")]
-    assert w.alerts.count() == 2
+    # 行情中断只在界面标红、不弹通知；同一告警 10 分钟内只弹一次；待确认信号每次都弹
+    w.handle({"type": "alert", "ts": 1, "kind": "FEED_INTERRUPTED", "symbol": "KORU",
+              "detail": "30 秒没有收到任何行情更新"})  # fmt: skip
+    w.handle({"type": "alert", "ts": 2, "kind": "RECONCILE_MISMATCH", "detail": "AAA 不一致"})
+    assert len(notes) == 1
+    for i in range(2):
+        w.handle({"type": "alert", "ts": 3 + i, "kind": "SIGNAL", "symbol": "NVDA", "detail": "x"})
+    assert len(notes) == 3
+    # 对账不一致单独一行红字
+    w.apply_status({**STATUS, "mismatch": {"SPY": "本地持仓 1，券商持仓 2"}})
+    assert w.mismatch.isVisibleTo(w) and "券商持仓 2" in w.mismatch.text()
+    w.apply_status(STATUS)
+    assert not w.mismatch.isVisibleTo(w)
+    assert w.alerts.count() == 6  # 2 条 + 上面新增的 4 条
     # 按钮 → 命令
     w.btn_start.click()
     w.btn_pause.click()

@@ -551,10 +551,12 @@ def test_merge_periods_and_tradable_score(ds):
     assert b.to_numpy() == pytest.approx(a.loc[b.index].to_numpy())
     assert any("合并区间" in n for n in merged.notes)
     r = full.ranking
-    assert list(r.index) == list(r["score_tradable"].sort_values(ascending=False).index)
+    scores = r["score_tradable"].tolist()
+    assert scores == sorted(scores, reverse=True)
     # 每日转化效率中位数 = 每天 可获取波动 / ADR% 的中位数
     d = full.daily[full.daily["symbol"] == "AAA"]
-    expect = (d["swing_capturable_pct_k025"] / d["adr_pct"]).median()
+    cap = np.asarray(d["swing_capturable_pct_k025"], dtype=float)
+    expect = float(np.median(cap / np.asarray(d["adr_pct"], dtype=float)))
     assert r.at["AAA", "daily_conversion_median"] == pytest.approx(expect)
 
 

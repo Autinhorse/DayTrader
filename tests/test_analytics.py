@@ -165,7 +165,9 @@ def test_last_leg_counts_the_closing_trend_but_not_as_a_swing():
     open_ = 14 * 3600 * 10**9
     m1 = flat(prices, open_)
     inp = DayInput(open_, open_ + len(prices) * M, m1, m1, adr=5.0, pc=100.0)
-    res = compute_day(inp, ReportParams(swing_thresholds_adr=(0.1,), score_k=0.1))
+    res = compute_day(
+        inp, ReportParams(swing_thresholds_adr=(0.1,), score_k=0.1, swing_skip_open_min=0)
+    )
     met = res.metrics
     # 前 7 分钟 100、101 交替：5 次完整摆动；最后一个转折点是 101（第 5 分钟），之后一路跌到 90
     assert met["swing_n_k010"] == 5
@@ -173,6 +175,21 @@ def test_last_leg_counts_the_closing_trend_but_not_as_a_swing():
     assert met["last_leg_adr_k010"] == pytest.approx((90 - 101) / 5)
     leg = res.last_legs[0.1]
     assert leg.start_price == 101 and leg.end_price == 90 and leg.start_ts == open_ + 5 * M
+
+
+def test_swings_in_the_opening_minutes_are_reported_separately():
+    # 摆动起点在第 0、1、2、3、4 分钟（开盘段）和之后 30 分钟后的一段来回
+    prices = [100, 101, 100, 101, 100, 101, *[101] * 25, 100, 101, 100]
+    open_ = 14 * 3600 * 10**9
+    m1 = flat(prices, open_)
+    inp = DayInput(open_, open_ + len(prices) * M, m1, m1, adr=5.0, pc=100.0)
+    p = ReportParams(swing_thresholds_adr=(0.1,), score_k=0.1, open_skip_compare=(0, 5, 30))
+    met = compute_day(inp, p).metrics
+    # 全部完整摆动：开盘段 5 次（起点 0–4 分钟），之后 101→100、100→101 两次（起点 5、30 分钟）
+    assert met["swing_n_k010_s00"] == 7
+    assert met["open_swing_n"] == 5 and met["swing_n_k010"] == 2 == met["swing_n_k010_s05"]
+    assert met["swing_n_k010_s30"] == 1
+    assert met["swing_capturable_pct_k010_s00"] >= met["swing_capturable_pct_k010"]
 
 
 # ---------- ADR ----------
@@ -465,23 +482,29 @@ def test_build_report_end_to_end(ds, tmp_path):
     assert rep.bucket_rv_share.shape == (3, 13)
     assert np.allclose(rep.bucket_rv_share.sum(axis=1), 1, atol=0.3)  # 各桶中位数之和接近 1
     assert set(rep.sensitivity.columns.get_level_values(0)) == {"0.1", "0.15", "0.25"}
+    assert set(rep.open_skip.columns.get_level_values(0)) == {"0", "5", "15", "30", "90"}
+    assert "open_swing_n_mean" in r.columns and "conversion" in r.columns
     assert list(rep.leveraged.index) == ["AAA / BBB"]
     assert rep.compare is not None and len(rep.compare) == 3  # 含参照证券
     assert any("没有 SPY" in n for n in rep.notes)
     assert {False, True} == set(rep.swings["confirmed"])  # 未确认的最后一段单独一行
+    (tmp_path / "out").mkdir()
+    (tmp_path / "out" / "anomaly_days.csv").write_text("old", encoding="utf-8")
     out = rep.export(tmp_path / "out")
+    assert not (out / "anomaly_days.csv").exists()  # 旧版本的文件被删掉
     names = {p.name for p in out.iterdir()}
     assert {
         "ranking.csv", "daily.csv", "swings.parquet", "excluded_days.csv", "data_issue_days.csv",
         "special_days.csv",
         "threshold_sensitivity.csv", "leveraged_pairs.csv", "extended_hours.csv",
-        "period_compare.csv",
+        "period_compare.csv", "open_skip_ranking.csv",
     } <= names  # fmt: skip
 
     from trader.analytics import report
 
     report.styled_ranking(rep).to_html()
     report.styled_sensitivity(rep).to_html()
+    report.styled_open_skip(rep).to_html()
     for fig in (
         report.fig_quadrant(rep),
         report.fig_boxplots(rep),

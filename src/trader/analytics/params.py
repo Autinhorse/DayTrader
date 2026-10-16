@@ -9,9 +9,16 @@ if TYPE_CHECKING:
     from trader.analytics.cleaning import BadWindow
 
 
-def ksuffix(k: float) -> str:
-    """摆动阈值的字段名后缀：0.1 → "k010"，0.15 → "k015"，0.25 → "k025"。"""
+def ksuffix(k: float | str) -> str:
+    """摆动阈值的字段名后缀：0.1 → "k010"，0.25 → "k025"。已经是后缀（字符串）时原样返回。"""
+    if isinstance(k, str):
+        return k
     return f"k{round(k * 100):03d}"
+
+
+def skip_suffix(k: float, minutes: int) -> str:
+    """开盘剔除对照用的字段名后缀：(0.25, 15) → "k025_s15"。"""
+    return f"{ksuffix(k)}_s{minutes:02d}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +28,11 @@ class ReportParams:
     adr_days: int = 21  # ADR：过去 adr_days 个常规交易日（不含提前收盘日）振幅的中位数
     swing_thresholds_adr: tuple[float, ...] = (0.1, 0.15, 0.25)
     score_k: float = 0.25  # 打分、时段指标、异常日检测用的摆动阈值
+    # 打分和汇总只统计开始于开盘后这么多分钟以后的摆动（每日选股规定 9:35 以后才交易）；
+    # 振幅、ADR 等仍用全天常规时段。开盘段的摆动另外列为参考
+    swing_skip_open_min: int = 5
+    # 开盘剔除对照：分别剔除开盘后这些分钟，各算一套排名（0 = 不剔除）
+    open_skip_compare: tuple[int, ...] = (0, 5, 15, 30, 90)
     vwap_cross_min_hold: int = 3  # 分钟（钟表时间）
     # 单边成本（基点），按当日实际开盘价（未复权）分档：(价格上限, 基点)，最后一档的上限为 None
     cost_tiers_bps: tuple[tuple[float | None, float], ...] = (

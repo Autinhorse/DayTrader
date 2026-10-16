@@ -50,8 +50,8 @@ uv run python tools/release_live.py [--tag V0.0.x]  :: 实盘发布：标签检�
 查询一律截止到回放时钟。notebook：`from trader.research import load_bars, compute_indicator, run_backtest,
 load_run, sweep`，示例 `user/notebooks/`。见 docs/decisions/0006。
 给用户的扩展说明（新指标、新策略、新图表）：docs/扩展指南.md。
-日内波动报表（决策 0009–0011，规范 v3.1）：`trader.analytics.build_report`，规范 docs/intraday_volatility_report_spec.md，
-notebook `user/notebooks/日内波动报表.ipynb`；只用常规时段打分，归一化用 ADR（21 日振幅中位数），价格复权到区间末日；
+日内波动报表（决策 0009–0012，规范 v3.2）：`trader.analytics.build_report`，规范 docs/intraday_volatility_report_spec.md，
+notebook `user/notebooks/日内波动报表.ipynb`；只用常规时段打分、只计开盘 5 分钟后开始的摆动（另有 0/5/15/30/90 分钟对照），归一化用 ADR（21 日振幅中位数），价格复权到区间末日；
 计算前清洗数据（`analytics.cleaning`，坏数据时段清单 `config/bad_data_windows.yaml`，只用于本报表）；
 只依赖 data/core，导出到 `reports/`（不进 git）。
 实盘版（阶段 6，决策 0007）：`trader.live.runner.LiveRunner` + `trader.brokers.ibkr`（`api.IbApi` 薄接口，

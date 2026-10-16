@@ -374,6 +374,15 @@ def styled_sensitivity(rep: VolReport):  # noqa: ANN201
     return styler.format(fmt, na_rep="—").background_gradient(cmap="YlGn_r", subset=ranks)
 
 
+def styled_open_skip(rep: VolReport):  # noqa: ANN201
+    """开盘剔除对照表：名次越绿越靠前。"""
+    t = rep.open_skip
+    styler: Any = t.style
+    fmt = {c: ("{:.0f}" if c[1] in ("rank", "score_total") else "{:.2f}") for c in t.columns}
+    ranks = [c for c in t.columns if c[1] == "rank"]
+    return styler.format(fmt, na_rep="—").background_gradient(cmap="YlGn_r", subset=ranks)
+
+
 LEVERAGE_NOTE = (
     "杠杆 ETF 的震荡形态与标的基本相同，二者应视为同一机会，根据资金规模和实际价差二选一。"
     "range_ratio 是每天振幅之比的中位数，可以和名义杠杆倍数对比；"

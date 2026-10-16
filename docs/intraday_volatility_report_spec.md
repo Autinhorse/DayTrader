@@ -1,10 +1,22 @@
-# 日内波动与震荡强度分析报表（Jupyter Notebook）设计规范 v3.1
+# 日内波动与震荡强度分析报表（Jupyter Notebook）设计规范 v3.2
 
 实现：`src/trader/analytics/`，notebook `user/notebooks/日内波动报表.ipynb`。实现约定见决策记录
 `docs/decisions/0009-intraday-volatility-report.md`（v1/v2）、`0010-intraday-report-v3.md`（v3）
-和 `0011-report-data-cleaning.md`（v3.1）。
+、`0011-report-data-cleaning.md`（v3.1）和 `0012-report-opening-segment.md`（v3.2）。
 
 ## 修订说明
+
+### v3.2（相对 v3.1，2026-10-16）
+
+v3.1 的结果显示大量摆动集中在开盘头几分钟（2026-07~09，0.25 ADR 下 33% 的已确认摆动开始于开盘 10 分钟内，
+AAPL、MSFT、AMZN 为 43–44%），而开盘时价差大、价格变化快，实际很难做到；每日选股规范也规定 9:35 以后才交易。
+
+1. **打分只统计开盘 `swing_skip_open_min`（默认 5）分钟以后开始的摆动**：摆动类字段（`swing_*`）、转化效率、打分、阈值敏感性、
+   多区间对比都按这个口径；振幅、ADR、body_ratio、VWAP 穿越等仍用全天常规时段。开盘段的摆动次数和可获取波动另列为参考
+2. **开盘剔除对照**（用户要求）：分别剔除开盘 0 / 5 / 15 / 30 / 90 分钟，各算一套综合得分和名次，并列转化效率、可获取波动均值、摆动次数均值
+3. **稳定性改用连续指标**：当日震荡分由当天的"可获取波动 / ADR%"和 1 − body_ratio 的百分位平均得到，不再用摆动次数（小整数并列多）
+4. 排名总表中，转化效率旁边并列可获取波动均值的绝对值
+5. 导出时删除旧版本留下的 `anomaly_days.csv`
 
 ### v3.1（相对 v3，2026-10-16）
 
@@ -94,6 +106,8 @@
 | `adr_days` | 21 | **ADR 天数**（替代 v2 的 `atr_days`） |
 | `swing_thresholds_adr` | `[0.1, 0.15, 0.25]` | **摆动识别阈值（ADR 倍数）** |
 | `score_k` | **0.25** | 打分、时段指标、特殊日检测使用哪个阈值（必须在上一项里）。v3 为 0.15，见 v3.1 修订说明 |
+| `swing_skip_open_min` | 5 | 摆动类指标和打分只统计开始于开盘这么多分钟以后的摆动（v3.2） |
+| `open_skip_compare` | `(0, 5, 15, 30, 90)` | 开盘剔除对照：分别剔除开盘这些分钟，各算一套排名（v3.2） |
 | `vwap_cross_min_hold` | 3 | VWAP 穿越后至少保持的分钟数 |
 | `cost_tiers_bps` | 价格 < $20：10；$20–$100：5；> $100：3 | 单边成本假设（基点），按当天实际（未复权）开盘价分档 |
 | `halt_gap_minutes` | 10 | 连续无成交超过该分钟数，标记 `possible_halt` |
@@ -182,6 +196,11 @@ ATR 不再用于任何打分或归一化。如需展示跳空，用 ADR 倍数�
 
 对 `swing_thresholds_adr` 中的每个 k 分别计算，字段名带后缀（`_k010`、`_k015`、`_k025`）。**θ = k × ADR**，c 为当日单边成本（百分数）。
 
+**开盘段（v3.2）**：摆动识别仍从开盘开始（保证转折点正确），但下表各字段只统计**起点**在开盘 `swing_skip_open_min` 分钟以后的摆动。另外：
+- `open_swing_n`、`open_capturable_pct`（`score_k` 阈值）：起点在开盘段内的摆动，只作参考，不参与打分
+- 开盘剔除对照（`score_k` 阈值）：对 `open_skip_compare` 中的每个 m，`swing_n_k025_s{m}`、`swing_avg_pct_k025_s{m}`、`swing_capturable_pct_k025_s{m}` 只统计起点在开盘 m 分钟以后的摆动（`_s00` 即不剔除）
+- 摆动明细表增加 `start_min`（起点距开盘分钟数）；摆动密度、时段指标、特殊日检测仍用全天的摆动
+
 | 字段 | 计算 |
 |---|---|
 | `swing_n` | 确认的摆动次数 |
@@ -245,9 +264,11 @@ ATR 不再用于任何打分或归一化。如需展示跳空，用 ADR 倍数�
 | **活跃度** `score_activity` | `range_pct` 中位数（0.5）、`rv_5min_pct` 中位数（0.5） | 波动够不够大 |
 | **震荡度** `score_rotation` | `swing_n` 均值（0.5）、1 − `body_ratio` 中位数（0.25）、`vwap_crosses` 中位数（0.25） | 是不是来回震荡 |
 | **摆动价值** `score_swing_value` | `swing_capturable_pct` 均值（0.4）、`capturable_days_ratio`（0.3）、`swing_avg_pct` 中位数（0.3） | 扣除确认损失和成本后有多少可获取的波动；是否大多数日子都有 |
-| **稳定性** `score_consistency` | 同 v2 | 是不是大多数日子都震荡 |
+| **稳定性** `score_consistency` | 见下 | 是不是大多数日子都震荡 |
 
-摆动类指标均使用 `score_k` 对应的阈值。稳定性中的"当日震荡分"使用当天的 `swing_n` 和 1 − `body_ratio`。
+摆动类指标均使用 `score_k` 对应的阈值，只统计开盘 `swing_skip_open_min` 分钟以后开始的摆动。
+
+**稳定性（v3.2）**：对每一天，用当天的"`swing_capturable_pct` / `adr_pct`"和 1 − `body_ratio` 在所有证券、所有交易日中算百分位，取平均得到"当日震荡分"。稳定性 = 当日震荡分 ≥ 50 的天数占比，再在证券之间做百分位排名。v3.1 及以前用摆动次数，小整数并列多，分数跳动大。
 
 ### 5.3 综合得分
 
@@ -261,23 +282,24 @@ ATR 不再用于任何打分或归一化。如需展示跳空，用 ADR 倍数�
 
 1. **参数和数据摘要**：同 v2，另外列出：数据异常日和行为特殊日及原因；数据清洗参数；区间内的拆股（来自本地公司行为数据）；价格口径
 2. **成本假设说明**：同 v2
-3. **排名总表**：综合得分、四个分项、流动性提示；关键原始指标（`range_pct`、`range_adr`、`adr_pct`、`body_ratio`、`swing_n` 中位数和均值、`swing_avg_pct`、`swing_capturable_pct` 中位数和均值、`capturable_days_ratio`、`conversion`、`vwap_crosses`、`missing_ratio`、`dollar_vol`）；`*_vs_spy`
-4. **摆动阈值敏感性表**（新增）：每只证券在 k = 0.1 / 0.15 / 0.25 下的 `swing_n` 均值、`swing_capturable_pct` 均值、`capturable_days_ratio`，以及在三个阈值下的综合得分和名次。用于判断排名是否依赖阈值的选择
-5. **象限散点图**：同 v2
-6. **分布对比**：同 v2
-7. **指标分布图**：同 v2
-8. **时段热力图**：同 v2
-9. **杠杆 ETF 与标的对照**（新增，`leveraged_pairs` 非空时）：每对并排显示
+3. **排名总表**：综合得分、四个分项、流动性提示；关键原始指标（`range_pct`、`range_adr`、`adr_pct`、`body_ratio`、`swing_n` 中位数和均值、`swing_avg_pct`、`swing_capturable_pct` 中位数和均值（绝对值）、`conversion`（与上一项并列）、`capturable_days_ratio`、开盘段的 `open_swing_n`、`open_capturable_pct` 均值、`vwap_crosses`、`missing_ratio`、`dollar_vol`）；`*_vs_spy`
+4. **摆动阈值敏感性表**（v3 新增）：每只证券在 k = 0.1 / 0.15 / 0.25 下的 `swing_n` 均值、`swing_capturable_pct` 均值、`capturable_days_ratio`，以及在三个阈值下的综合得分和名次。用于判断排名是否依赖阈值的选择
+5. **剔除开盘段的排名对照**（v3.2 新增）：每只证券在剔除开盘 0 / 5 / 15 / 30 / 90 分钟时的综合得分、名次、转化效率、可获取波动均值（绝对值）、摆动次数均值。名次随剔除时长下降很多的证券，好成绩主要来自开盘段
+6. **象限散点图**：同 v2
+7. **分布对比**：同 v2
+8. **指标分布图**：同 v2
+9. **时段热力图**：同 v2
+10. **杠杆 ETF 与标的对照**（新增，`leveraged_pairs` 非空时）：每对并排显示
    - 两者的 `range_pct`、`body_ratio`、`swing_n`、`efficiency`、`swing_capturable_pct` 均值、`conversion`、`dollar_vol`
    - 振幅比（杠杆 ETF / 标的，每天之比的中位数），与名义杠杆倍数对比
    - 两者 5 分钟收益率的相关系数（每天只用两边都有的 bar，收益率不跨日）
    - 说明文字："杠杆 ETF 的震荡形态与标的基本相同，二者应视为同一机会，根据资金规模和实际价差二选一"
    - 对里有证券不在本次计算中时，不列出并注明
-10. **扩展时段参考**（新增，见第 7 节，不参与打分）
-11. **单只证券详情**：同 v2，单日价格图上额外用虚线画出未确认的最后一段
-12. **核对图**（新增）：数据异常日（灰色为清洗前的高低价）和行为特殊日，各最多 `review_plot_max` 张 1 分钟价格图（每 8 张拼成一幅）
-13. **多区间对比**（新增，`compare_periods` 非空时）：两个区间的综合得分和名次对照表（含参照证券），以及名次的 Spearman 相关系数
-14. **指标说明**：同 v2，补充 ADR、`last_leg`、`capturable_days_ratio`、异常日、扩展时段指标的说明
+11. **扩展时段参考**（新增，见第 7 节，不参与打分）
+12. **单只证券详情**：同 v2，单日价格图上额外用虚线画出未确认的最后一段
+13. **核对图**（新增）：数据异常日（灰色为清洗前的高低价）和行为特殊日，各最多 `review_plot_max` 张 1 分钟价格图（每 8 张拼成一幅）
+14. **多区间对比**（新增，`compare_periods` 非空时）：两个区间的综合得分和名次对照表（含参照证券），以及名次的 Spearman 相关系数
+15. **指标说明**：同 v2，补充 ADR、`last_leg`、`capturable_days_ratio`、异常日、扩展时段指标的说明
 
 ## 7. 扩展时段参考指标（新增，不参与打分）
 
@@ -310,7 +332,7 @@ ATR 不再用于任何打分或归一化。如需展示跳空，用 ADR 倍数�
 ## 8. 导出
 
 导出到 `reports/intraday_vol_<开始>_<结束>/`（不进 git），CSV 用 UTF-8 带 BOM，Excel 可直接打开：
-- CSV：排名总表 `ranking.csv`、每日指标明细 `daily.csv`（含扩展时段字段）、未参与汇总的日子 `excluded_days.csv`、数据异常日 `data_issue_days.csv`、行为特殊日 `special_days.csv`、阈值敏感性表 `threshold_sensitivity.csv`、杠杆对照表 `leveraged_pairs.csv`、扩展时段汇总 `extended_hours.csv`、多区间对比 `period_compare.csv`（后三个有内容时才导出）
+- CSV：排名总表 `ranking.csv`、每日指标明细 `daily.csv`（含扩展时段字段）、未参与汇总的日子 `excluded_days.csv`、数据异常日 `data_issue_days.csv`、行为特殊日 `special_days.csv`、阈值敏感性表 `threshold_sensitivity.csv`、开盘剔除对照 `open_skip_ranking.csv`、杠杆对照表 `leveraged_pairs.csv`、扩展时段汇总 `extended_hours.csv`、多区间对比 `period_compare.csv`（后三个有内容时才导出）
 - Parquet：摆动明细 `swings.parquet`（含 `confirmed` 字段）
 - 可选：HTML 报告（jupyterlab 自带的 nbconvert）；Excel 带格式导出不做
 
@@ -331,6 +353,7 @@ v2 的全部测试保留，ATR 相关测试改为 ADR，另外新增：
   - 三段跳空之和等于 `gap_adr`
   - 小成交量 bar 不影响盘前最高价 / 最低价
 - **阈值敏感性**：k 越小，`swing_n` 应单调不减（用大量随机游走做性质测试）
+- **开盘段**（v3.2）：构造开盘段和之后都有摆动的序列，确认按起点时刻分开统计，各剔除时长的计数正确；导出时旧的 `anomaly_days.csv` 被删除
 
 ## 10. 后续扩展（不在 v3 范围内）
 

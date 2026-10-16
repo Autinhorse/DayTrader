@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from trader.analytics.params import ReportParams, ksuffix
+from trader.analytics.params import ReportParams, ksuffix, skip_suffix
 from trader.analytics.quality import outlier_bars
 from trader.analytics.swings import FineBars, Swing, find_swings
 
@@ -226,7 +226,24 @@ def compute_day(inp: DayInput, p: ReportParams) -> DayResult:
         run = find_swings(m1.ts, m1.open, m1.high, m1.low, theta, MIN_NS, inp.fine)
         ambiguous += run.ambiguous
         swings[k] = run.swings
-        met.update(_swing_stats(run.swings, sfx, theta, adr, met["cost_pct"]))
+        cutoff = inp.day_open + p.swing_skip_open_min * MIN_NS
+        main = [s for s in run.swings if s.start_ts >= cutoff]
+        met.update(_swing_stats(main, sfx, theta, adr, met["cost_pct"]))
+        if k == p.score_k:
+            # 开盘段（开盘到 swing_skip_open_min）的摆动，只作参考
+            head = [s for s in run.swings if s.start_ts < cutoff]
+            st = _swing_stats(head, "x", theta, adr, met["cost_pct"])
+            met["open_swing_n"] = st["swing_n_x"]
+            met["swing_n_all"] = float(len(run.swings))  # 全天（含开盘段），特殊日检测用
+            met["open_capturable_pct"] = st["swing_capturable_pct_x"]
+            # 开盘剔除对照：每个剔除时长各一组（只算打分用到的三项）
+            for m in p.open_skip_compare:
+                t0 = inp.day_open + m * MIN_NS
+                st = _swing_stats([s for s in run.swings if s.start_ts >= t0], "x", theta, adr,
+                                  met["cost_pct"])  # fmt: skip
+                ss = skip_suffix(k, m)
+                for f in ("n", "avg_pct", "capturable_pct"):
+                    met[f"swing_{f}_{ss}"] = st[f"swing_{f}_x"]
         if math.isfinite(theta):
             legs[k] = LastLeg(run.pivot_ts, int(m1.ts[-1]), run.pivot, c)
             met[f"last_leg_pct_{sfx}"] = (c - run.pivot) / run.pivot * 100

@@ -7,8 +7,9 @@ from typing import Any, cast
 
 import pandas as pd
 
+from trader.analytics.aggregate import capturable_days_ratio, conversion
 from trader.analytics.frames import included
-from trader.analytics.params import ReportParams, ksuffix
+from trader.analytics.params import ReportParams, ksuffix, skip_suffix
 
 
 def pct_rank(x: Any) -> pd.Series:
@@ -33,12 +34,12 @@ def weighted(parts: Mapping[str, Any], weights: dict[str, float]) -> pd.Series:
     return acc
 
 
-def consistency(daily: pd.DataFrame, k: float) -> pd.Series:
-    """当日震荡分 = 当天 swing_n 和 1 − body_ratio 在所有证券、所有交易日中的百分位的平均；
-    稳定性原值 = 当日震荡分 ≥ 50 的天数占比。"""
+def consistency(daily: pd.DataFrame, k: float | str) -> pd.Series:
+    """当日震荡分 = 当天"可获取波动 / ADR%"和 1 − body_ratio 在所有证券、所有交易日中的百分位
+    的平均（都是连续值，比摆动次数这种小整数少并列）；稳定性原值 = 当日震荡分 ≥ 50 的天数占比。"""
     d = included(daily)
-    n_col = f"swing_n_{ksuffix(k)}"
-    day_score = (pct_rank(d[n_col]) + pct_rank(1 - d["body_ratio"])) / 2
+    cap = d[f"swing_capturable_pct_{ksuffix(k)}"] / d["adr_pct"]
+    day_score = (pct_rank(cap) + pct_rank(1 - d["body_ratio"])) / 2
     hit = (day_score >= 50).astype(float).where(day_score.notna())
     return hit.groupby(d["symbol"]).mean()
 
@@ -49,9 +50,9 @@ def score(
     days_ratio: pd.Series,
     daily: pd.DataFrame,
     p: ReportParams,
-    k: float | None = None,
+    k: float | str | None = None,
 ) -> pd.DataFrame:
-    """k：摆动阈值，默认 score_k（阈值敏感性表用其他阈值重算）。"""
+    """k：摆动阈值或字段后缀，默认 score_k（阈值敏感性、开盘剔除对照用其他口径重算）。"""
     k = p.score_k if k is None else k
     s = ksuffix(k)
     activity = weighted({c: med[c] for c in p.activity_weights}, p.activity_weights)
@@ -118,3 +119,26 @@ def sensitivity(
             }
         )
     return pd.concat(parts, axis=1, names=["k", "field"])
+
+
+def open_skip_table(
+    med: pd.DataFrame, mean: pd.DataFrame, daily: pd.DataFrame, p: ReportParams
+) -> pd.DataFrame:
+    """开盘剔除对照：分别只统计开始于开盘 m 分钟以后的摆动（m 取 open_skip_compare），
+    各算一次综合得分和名次，并列出转化效率、可获取波动均值（绝对值）、摆动次数均值。
+    振幅、ADR、body_ratio 等不变。列为 (剔除分钟数, 字段) 两级。"""
+    parts = {}
+    for m in p.open_skip_compare:
+        ss = skip_suffix(p.score_k, m)
+        dr = capturable_days_ratio(daily, ss)
+        sc = score(med, mean, dr, daily, p, ss)
+        parts[f"{m}"] = pd.DataFrame(
+            {
+                "score_total": sc["score_total"],
+                "rank": sc["score_total"].rank(ascending=False, method="min"),
+                "conversion": conversion(med, mean, ss),
+                "capturable_mean": mean[f"swing_capturable_pct_{ss}"],
+                "swing_n_mean": mean[f"swing_n_{ss}"],
+            }
+        )
+    return pd.concat(parts, axis=1, names=["skip_min", "field"])

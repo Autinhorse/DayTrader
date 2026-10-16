@@ -61,13 +61,13 @@ def means(daily: pd.DataFrame) -> pd.DataFrame:
     return cast(pd.DataFrame, d.groupby("symbol")[metric_columns(d)].mean())
 
 
-def conversion(med: pd.DataFrame, mean: pd.DataFrame, k: float) -> pd.Series:
+def conversion(med: pd.DataFrame, mean: pd.DataFrame, k: float | str) -> pd.Series:
     """转化效率 = swing_capturable_pct 均值 / adr_pct 中位数：日内波动有多少能变成可交易的摆动。"""
     return mean[f"swing_capturable_pct_{ksuffix(k)}"] / med["adr_pct"]
 
 
-def capturable_days_ratio(daily: pd.DataFrame, k: float) -> pd.Series:
-    """swing_capturable_pct（阈值 k）> 0 的天数占比。"""
+def capturable_days_ratio(daily: pd.DataFrame, k: float | str) -> pd.Series:
+    """swing_capturable_pct（阈值 k，或字段后缀）> 0 的天数占比。"""
     d = included(daily)
     col = d[f"swing_capturable_pct_{ksuffix(k)}"]
     hit = (col > 0).astype(float).where(col.notna())

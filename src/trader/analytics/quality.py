@@ -46,7 +46,7 @@ def flag_anomalies(daily: pd.DataFrame, p: ReportParams) -> pd.DataFrame:
       或清洗后仍有 1 分钟价格尖刺（持续一分钟以上，多半是消息行情）。数据没问题，只标记。
 
     摆动次数的中位数只用参与汇总的日子（提前收盘、ADR 不足的日子不算）。"""
-    n_col = f"swing_n_{ksuffix(p.score_k)}"
+    n_col = "swing_n_all" if "swing_n_all" in daily.columns else f"swing_n_{ksuffix(p.score_k)}"
     base = daily[daily["included"]].groupby("symbol")[n_col].median()
     med = cast(pd.Series, daily["symbol"]).map(cast(dict, base.to_dict()))
     win = daily["window_minutes"] > 0

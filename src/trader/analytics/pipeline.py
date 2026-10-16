@@ -21,6 +21,7 @@ from trader.data.corporate_actions import load_actions
 from trader.data.history import HistoryService
 
 NY = "America/New_York"
+OBSOLETE_EXPORTS = ("anomaly_days.csv",)
 
 
 def _d(x: str | date) -> date:
@@ -55,6 +56,7 @@ class VolReport:
     bucket_rv_share: pd.DataFrame
     ranking: pd.DataFrame
     sensitivity: pd.DataFrame  # 摆动阈值敏感性，列为 (阈值, 字段)
+    open_skip: pd.DataFrame  # 开盘剔除对照，列为 (剔除分钟数, 字段)
     leveraged: pd.DataFrame  # 杠杆 ETF 与标的对照（leveraged_pairs 为空时是空表）
     eth_summary: pd.DataFrame  # 扩展时段参考（不参与打分）
     splits: pd.DataFrame  # 区间内的拆股
@@ -86,8 +88,8 @@ class VolReport:
         """行为特殊日：摆动密度过高或摆动次数远超平常（数据没问题，只标记）。"""
         d = self.daily
         k = ksuffix(self.params.score_k)
-        cols = ["symbol", "date", "special_reason", "range_pct", "range_adr", f"swing_n_{k}",
-                "swing_density", "data_issue"]  # fmt: skip
+        cols = ["symbol", "date", "special_reason", "range_pct", "range_adr", "swing_n_all",
+                f"swing_n_{k}", "swing_density", "data_issue"]  # fmt: skip
         return d.loc[d["special_day"], cols].reset_index(drop=True)
 
     def detail_tickers(self) -> list[str]:
@@ -113,6 +115,11 @@ class VolReport:
         sens = self.sensitivity.copy()
         sens.columns = [f"k{a}_{b}" for a, b in sens.columns]
         sens.to_csv(out / "threshold_sensitivity.csv", encoding=enc)
+        osk = self.open_skip.copy()
+        osk.columns = [f"skip{a}_{b}" for a, b in osk.columns]
+        osk.to_csv(out / "open_skip_ranking.csv", encoding=enc)
+        for old in OBSOLETE_EXPORTS:  # 旧版本留下的文件，避免和新文件混淆
+            (out / old).unlink(missing_ok=True)
         if not self.leveraged.empty:
             self.leveraged.to_csv(out / "leveraged_pairs.csv", encoding=enc)
         if not self.eth_summary.empty:
@@ -198,6 +205,7 @@ def build_report(
                 }
             )
             adr = m["adr"]
+            n_before = len(swing_rows)
             for k, sws in res.swings.items():
                 for sw in sws:
                     swing_rows.append(
@@ -213,6 +221,8 @@ def build_report(
                     )  # fmt: skip
             for b in res.buckets:
                 bucket_rows.append({"symbol": sym, "date": day, **b})
+            for r in swing_rows[n_before:]:
+                r["start_min"] = (r["start"] - inp.day_open) / 60e9  # 距开盘分钟数
 
     daily = pd.DataFrame(day_rows)
     if daily.empty:
@@ -250,8 +260,10 @@ def build_report(
             f"swing_avg_pct_{sfx}": med[f"swing_avg_pct_{sfx}"],
             f"swing_capturable_pct_{sfx}": med[f"swing_capturable_pct_{sfx}"],
             f"swing_capturable_pct_{sfx}_mean": mean[f"swing_capturable_pct_{sfx}"],
-            "capturable_days_ratio": days_ratio[p.score_k].reindex(med.index),
             "conversion": aggregate.conversion(med, mean, p.score_k),
+            "capturable_days_ratio": days_ratio[p.score_k].reindex(med.index),
+            "open_swing_n_mean": mean["open_swing_n"],
+            "open_capturable_pct_mean": mean["open_capturable_pct"],
             "vwap_crosses": med["vwap_crosses"],
             "missing_ratio": med["missing_ratio"],
             "dollar_vol": med["dollar_vol"],
@@ -264,6 +276,7 @@ def build_report(
     ranking = ranking.sort_values("score_total", ascending=False)
     ranking.index.name = "symbol"
     sens = scoring.sensitivity(med, mean, daily, p, days_ratio).reindex(ranking.index)
+    open_skip = scoring.open_skip_table(med, mean, daily, p).reindex(ranking.index)
     lev, lev_notes = aggregate.leveraged_table(
         daily, med, mean, path_close, p.leveraged_pairs, p.score_k
     )
@@ -307,6 +320,7 @@ def build_report(
         bucket_rv_share=aggregate.bucket_medians(buckets).reindex(ranking.index),
         ranking=ranking,
         sensitivity=sens,
+        open_skip=open_skip,
         leveraged=lev,
         eth_summary=eth_sum,
         splits=_splits(h, [x for x in all_syms if x not in missing], s, e),

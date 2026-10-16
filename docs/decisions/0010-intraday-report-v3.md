@@ -1,6 +1,6 @@
 # 0010 日内波动报表 v3：ADR、异常日、扩展时段参考
 
-日期：2026-10-16　状态：已采纳　依据：`docs/intraday_volatility_report_spec.md` v3（用户根据 v2 首次运行结果修订，审阅后定稿）
+日期：2026-10-16　状态：已采纳（ADR 均值、打分阈值、异常日分类由 0011 修订）　依据：`docs/intraday_volatility_report_spec.md` v3（用户根据 v2 首次运行结果修订，审阅后定稿）
 
 ## 背景
 

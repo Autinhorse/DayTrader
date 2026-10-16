@@ -11,10 +11,13 @@ from trader.analytics.frames import included
 from trader.analytics.params import ksuffix
 
 # 不参与汇总的列（价格本身没有跨证券比较的意义）
-_SKIP = {"open", "high", "low", "close", "adr", "raw_open", "cost_pct", "pm_high", "pm_low"}
+_SKIP = {
+    "open", "high", "low", "close", "adr", "raw_open", "cost_pct", "pm_high", "pm_low",
+    "filter_limit",
+}  # fmt: skip
 _FIXED = {
     "symbol", "date", "benchmark", "early_close", "possible_halt", "adr_ok", "included",
-    "anomaly_flag", "anomaly_reason",
+    "data_issue", "data_reason", "special_day", "special_reason",
 }  # fmt: skip
 
 
@@ -23,7 +26,10 @@ def metric_columns(daily: pd.DataFrame) -> list[str]:
     return [
         c
         for c in daily.columns
-        if c not in fixed and c not in _SKIP and pd.api.types.is_numeric_dtype(daily[c])
+        if c not in fixed
+        and c not in _SKIP
+        and pd.api.types.is_numeric_dtype(daily[c])
+        and not pd.api.types.is_bool_dtype(daily[c])
     ]
 
 
@@ -53,6 +59,11 @@ def medians(daily: pd.DataFrame) -> pd.DataFrame:
 def means(daily: pd.DataFrame) -> pd.DataFrame:
     d = included(daily)
     return cast(pd.DataFrame, d.groupby("symbol")[metric_columns(d)].mean())
+
+
+def conversion(med: pd.DataFrame, mean: pd.DataFrame, k: float) -> pd.Series:
+    """转化效率 = swing_capturable_pct 均值 / adr_pct 中位数：日内波动有多少能变成可交易的摆动。"""
+    return mean[f"swing_capturable_pct_{ksuffix(k)}"] / med["adr_pct"]
 
 
 def capturable_days_ratio(daily: pd.DataFrame, k: float) -> pd.Series:
@@ -163,6 +174,7 @@ def leveraged_table(
     rows = []
     notes = []
     d = included(daily)
+    conv = conversion(med, mean, k)
     for lev, (und, mult) in pairs.items():
         lev, und = lev.upper(), und.upper()
         if lev not in med.index or und not in med.index:
@@ -181,8 +193,12 @@ def leveraged_table(
             ("swing_n", med, f"swing_n_{s}"),
             ("efficiency", med, "efficiency"),
             ("capturable_mean", mean, f"swing_capturable_pct_{s}"),
+            ("conversion", conv, None),
             ("dollar_vol", med, "dollar_vol"),
         ):
+            if col is None:
+                row[f"{name}_lev"], row[f"{name}_und"] = src.at[lev], src.at[und]
+                continue
             row[f"{name}_lev"] = src.at[lev, col]
             row[f"{name}_und"] = src.at[und, col]
         row["range_ratio"] = ratio

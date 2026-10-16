@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from datetime import date
+from datetime import date, time
 
 import matplotlib
 import numpy as np
@@ -15,6 +15,13 @@ import pytest
 
 from conftest import CAL, make_dataset, synth_day
 from trader.analytics import ReportParams, build_report
+from trader.analytics.cleaning import (
+    BadWindow,
+    clean_day,
+    clean_fine,
+    load_bad_windows,
+    resample_close,
+)
 from trader.analytics.daily_metrics import Bars, DayInput, compute_day, efficiency, vwap_crosses
 from trader.analytics.extended_hours import EthDay, eth_metrics
 from trader.analytics.loader import adr_series
@@ -171,18 +178,19 @@ def test_last_leg_counts_the_closing_trend_but_not_as_a_swing():
 # ---------- ADR ----------
 
 
-def test_adr_simple_average_and_no_lookahead():
-    r = np.array([2, 4, 6, 8.0])
+def test_adr_median_and_no_lookahead():
+    r = np.array([2, 4, 9, 8.0])
     adr = adr_series(r, 3)
     assert np.isnan(adr[:2]).all()
-    assert adr[2] == pytest.approx(4) and adr[3] == pytest.approx(6)
+    # 中位数：一个大行情日（9）不会把 ADR 拉高
+    assert adr[2] == pytest.approx(4) and adr[3] == pytest.approx(8)
     r2 = r.copy()
     r2[-1] = 100  # 改动最后一天不影响之前的值
     assert np.array_equal(adr_series(r2, 3)[:3], adr[:3], equal_nan=True)
 
 
 def test_adr_skips_early_close_days():
-    adr = adr_series(np.array([2, 4, np.nan, 6.0]), 3)  # 第 3 天提前收盘：不计入、不占名额
+    adr = adr_series(np.array([2, 4, np.nan, 7.0]), 3)  # 第 3 天提前收盘：不计入、不占名额
     assert np.isnan(adr[2]) and adr[3] == pytest.approx(4)
 
 
@@ -281,22 +289,89 @@ def test_outlier_bar_is_detected():
     assert outlier_bars(bars(rows), 0.5, skip_before=25 * M) == 0  # 开盘头几分钟不判断
 
 
-def test_flag_anomalies_reasons():
+def test_flag_two_kinds_of_days():
     n = [10.0] * 9 + [50.0]
     daily = pd.DataFrame(
         {
             "symbol": ["A"] * 10,
             "included": [True] * 10,
-            "swing_n_k015": n,
-            "swing_density": [5.0] * 8 + [13.0, 5.0],
-            "outlier_bars": [0.0] * 7 + [2.0, 0.0, 0.0],
+            "swing_n_k025": n,
+            "swing_density": [3.0] * 8 + [8.0, 3.0],
+            "outlier_bars": [0.0] * 6 + [1.0, 0.0, 0.0, 0.0],
+            "window_minutes": [3.0] + [0.0] * 9,
+            "changed_minutes": [0.0, 2.0] + [0.0] * 8,
+            "fixed_prints": [0.0, 5.0] + [0.0] * 8,
         }
     )
     out = flag_anomalies(daily, ReportParams())
-    assert out["anomaly_flag"].tolist() == [False] * 7 + [True] * 3
-    assert "离群" in out.at[7, "anomaly_reason"]
-    assert "摆动密度" in out.at[8, "anomaly_reason"]
-    assert "摆动次数 50" in out.at[9, "anomaly_reason"]
+    assert out["data_issue"].tolist() == [True, True] + [False] * 8
+    assert "坏数据时段" in out.at[0, "data_reason"]
+    assert "修正离群成交 5 笔" in out.at[1, "data_reason"]
+    assert out["special_day"].tolist() == [False] * 6 + [True, False, True, True]
+    assert "价格尖刺" in out.at[6, "special_reason"]
+    assert "摆动密度" in out.at[8, "special_reason"]
+    assert "摆动次数 50" in out.at[9, "special_reason"]
+
+
+# ---------- 数据清洗 ----------
+
+
+def _secs(prices: Sequence[float], start: int = 0) -> Bars:
+    p = np.asarray(prices, dtype=float)
+    n = len(p)
+    return Bars(
+        ts=start + np.arange(n, dtype=np.int64) * 10**9, open=p.copy(), high=p + 0.01,
+        low=p - 0.01, close=p.copy(), volume=np.full(n, 100.0), vwap=p.copy(),
+    )  # fmt: skip
+
+
+def test_clean_fine_fixes_isolated_bad_print_but_keeps_trend():
+    b = _secs([100.0] * 60)
+    lo = b.low.copy()
+    lo[30] = 95.0  # 一笔离群成交：最低价 95，开收盘正常
+    b = Bars(b.ts, b.open, b.high, lo, b.close, b.volume, b.vwap)
+    out, fixed = clean_fine(b, 1.0)
+    assert fixed == 1 and out.low.min() == pytest.approx(99.99) and len(out) == 60
+    bad = _secs([100.0] * 30 + [95.0] + [100.0] * 29)  # 开收盘都离群：整根删掉
+    out2, fixed2 = clean_fine(bad, 1.0)
+    assert fixed2 == 1 and len(out2) == 59
+    trend = _secs(list(np.linspace(100, 110, 120)))  # 两分钟涨 10，远超阈值，但不是离群
+    out3, fixed3 = clean_fine(trend, 1.0)
+    assert fixed3 == 0 and len(out3) == 120
+
+
+def test_rebuild_minutes_and_bad_windows(tmp_path):
+    fine = _secs([100.0] * 180)  # 3 分钟
+    lo = fine.low.copy()
+    lo[70] = 90.0
+    fine = Bars(fine.ts, fine.open, fine.high, lo, fine.close, fine.volume, fine.vwap)
+    m1 = Bars(
+        ts=np.arange(3, dtype=np.int64) * M, open=np.full(3, 100.0), high=np.full(3, 100.01),
+        low=np.array([99.99, 90.0, 99.99]), close=np.full(3, 100.0), volume=np.full(3, 1e4),
+        vwap=np.full(3, 100.0),
+    )  # fmt: skip
+    res = clean_day(m1, fine, 1.0, [])
+    assert res.m1.low.min() == pytest.approx(99.99) and res.changed_minutes == 1
+    assert res.m1.volume.tolist() == [1e4] * 3  # 成交量沿用原来的 1 分钟 bar
+    res2 = clean_day(m1, fine, 1.0, [(M, 2 * M)])  # 第 2 分钟在坏数据时段里
+    assert res2.window_minutes == 1 and res2.m1.ts.tolist() == [0, 2 * M]
+    path = tmp_path / "bad.yaml"
+    path.write_text(
+        '- date: 2026-09-21\n  start: "11:42"\n  end: "11:45"\n  symbols: all\n',
+        encoding="utf-8",
+    )
+    (w,) = load_bad_windows(path)
+    assert w.applies("KORU", date(2026, 9, 21)) and not w.applies("KORU", date(2026, 9, 22))
+    a, z = w.ns_range()
+    assert (z - a) == 3 * M
+
+
+def test_resample_close_aligns_to_open():
+    m1 = flat([100, 101, 102, 103, 104, 105, 106], 0)
+    m1 = Bars(np.array([0, 1, 2, 3, 4, 5, 9]) * M, m1.open, m1.high, m1.low, m1.close, m1.volume,
+              m1.vwap)  # fmt: skip
+    b5 = resample_close(m1, 0, 5 * M)
+    assert b5.ts.tolist() == [0, 5 * M] and b5.close.tolist() == [104, 106]
 
 
 def _real_day_exists(symbol: str, day: str) -> bool:
@@ -309,8 +384,14 @@ def _real_day_exists(symbol: str, day: str) -> bool:
 def test_koru_2026_09_21_is_flagged_on_real_data():
     # 11:42–11:43 一串离群成交（约 21.5，而价格在 22.45 附近），造成几十次虚假摆动
     rep = build_report(["KORU"], "2026-09-21", "2026-09-21", benchmark_tickers=())
-    a = rep.anomalies
-    assert len(a) == 1 and "离群" in a.at[0, "anomaly_reason"]
+    a = rep.data_issues
+    assert len(a) == 1 and "坏数据时段删除 3 分钟" in a.at[0, "data_reason"]
+    # 清洗后摆动次数回到正常水平；不清洗时 11:42 那一串坏成交会造成十几次虚假摆动
+    raw = build_report(
+        ["KORU"], "2026-09-21", "2026-09-21", benchmark_tickers=(), bad_windows=(),
+        print_filter_adr=float("inf"),
+    )  # fmt: skip
+    assert raw.daily["swing_n_k025"].iloc[0] - rep.daily["swing_n_k025"].iloc[0] >= 10
 
 
 # ---------- 扩展时段 ----------
@@ -391,7 +472,8 @@ def test_build_report_end_to_end(ds, tmp_path):
     out = rep.export(tmp_path / "out")
     names = {p.name for p in out.iterdir()}
     assert {
-        "ranking.csv", "daily.csv", "swings.parquet", "excluded_days.csv", "anomaly_days.csv",
+        "ranking.csv", "daily.csv", "swings.parquet", "excluded_days.csv", "data_issue_days.csv",
+        "special_days.csv",
         "threshold_sensitivity.csv", "leveraged_pairs.csv", "extended_hours.csv",
         "period_compare.csv",
     } <= names  # fmt: skip
@@ -413,19 +495,22 @@ def test_build_report_end_to_end(ds, tmp_path):
     assert len(report.param_summary(rep)) > 5
 
 
-def test_anomaly_days_get_review_figures(ds):
-    # 把阈值调到每天都算异常，确认核对图能画、剔除开关生效
+def test_review_days_figures_and_exclusion(ds):
+    # 每天都放一个坏数据时段、把密度阈值调到 0：两类日子都有，核对图能画，剔除开关只管数据异常
+    windows = tuple(BadWindow(date(2026, 1, d), time(10, 0), time(10, 5)) for d in (7, 8, 9))
     rep = build_report(
         ["AAA"], "2026-01-07", "2026-01-09", history=ds.history, benchmark_tickers=(), adr_days=2,
-        anomaly_swing_density=0.0, exclude_anomaly_days=True,
+        anomaly_swing_density=0.0, bad_windows=windows, exclude_data_issue_days=True,
     )  # fmt: skip
     from trader.analytics import report
 
-    assert len(rep.anomalies) == 3
-    assert set(rep.excluded["reason"]) == {"异常日（已设置剔除）"}
+    assert len(rep.data_issues) == 3 and len(rep.special_days) == 3
+    assert set(rep.excluded["reason"]) == {"数据异常日（已设置剔除）"}
     assert rep.daily["included"].tolist() == [False] * 3
-    figs = report.figs_anomaly_days(rep)
-    assert len(figs) == 1 and len(figs[0].axes) == 4  # 3 张小图 + 1 个空位
+    assert rep.daily["window_minutes"].tolist() == [5.0] * 3
+    for kind in ("data", "special"):
+        figs = report.figs_review_days(rep, kind)
+        assert len(figs) == 1 and len(figs[0].axes) == 4  # 3 张小图 + 1 个空位
 
 
 def test_adr_shortfall_is_excluded(ds):

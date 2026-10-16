@@ -11,6 +11,7 @@ from typing import Any, cast
 import pandas as pd
 
 from trader.analytics import aggregate, extended_hours, quality, scoring
+from trader.analytics.cleaning import load_bad_windows
 from trader.analytics.daily_metrics import compute_day
 from trader.analytics.extended_hours import eth_metrics
 from trader.analytics.frames import corr
@@ -73,14 +74,21 @@ class VolReport:
         return d.loc[d["possible_halt"], cols].reset_index(drop=True)
 
     @property
-    def anomalies(self) -> pd.DataFrame:
+    def data_issues(self) -> pd.DataFrame:
+        """数据异常日：坏数据时段、清洗修正过的日子、清洗后仍有离群 bar 的日子。"""
+        d = self.daily
+        cols = ["symbol", "date", "data_reason", "fixed_prints", "changed_minutes",
+                "window_minutes", "outlier_bars", "included"]  # fmt: skip
+        return d.loc[d["data_issue"], cols].reset_index(drop=True)
+
+    @property
+    def special_days(self) -> pd.DataFrame:
+        """行为特殊日：摆动密度过高或摆动次数远超平常（数据没问题，只标记）。"""
         d = self.daily
         k = ksuffix(self.params.score_k)
-        cols = [
-            "symbol", "date", "anomaly_reason", "range_pct", f"swing_n_{k}", "swing_density",
-            "outlier_bars", "included",
-        ]  # fmt: skip
-        return d.loc[d["anomaly_flag"], cols].reset_index(drop=True)
+        cols = ["symbol", "date", "special_reason", "range_pct", "range_adr", f"swing_n_{k}",
+                "swing_density", "data_issue"]  # fmt: skip
+        return d.loc[d["special_day"], cols].reset_index(drop=True)
 
     def detail_tickers(self) -> list[str]:
         r = self.ranking
@@ -100,7 +108,8 @@ class VolReport:
         self.ranking.to_csv(out / "ranking.csv", encoding=enc)
         self.daily.to_csv(out / "daily.csv", index=False, encoding=enc)
         self.excluded.to_csv(out / "excluded_days.csv", index=False, encoding=enc)
-        self.anomalies.to_csv(out / "anomaly_days.csv", index=False, encoding=enc)
+        self.data_issues.to_csv(out / "data_issue_days.csv", index=False, encoding=enc)
+        self.special_days.to_csv(out / "special_days.csv", index=False, encoding=enc)
         sens = self.sensitivity.copy()
         sens.columns = [f"k{a}_{b}" for a, b in sens.columns]
         sens.to_csv(out / "threshold_sensitivity.csv", encoding=enc)
@@ -127,6 +136,12 @@ def build_report(
     **overrides: Any,
 ) -> VolReport:
     p = replace(params or ReportParams(), **overrides)
+    if p.bad_windows is None:
+        from trader.config import project_dir
+
+        p = replace(
+            p, bad_windows=load_bad_windows(project_dir() / "config" / "bad_data_windows.yaml")
+        )
     if p.score_k not in p.swing_thresholds_adr:
         raise ValueError(
             f"score_k={p.score_k} 必须在 swing_thresholds_adr {p.swing_thresholds_adr} 里"
@@ -203,11 +218,11 @@ def build_report(
     if daily.empty:
         raise ValueError("所选证券在这段时间里没有可用数据（缺数据的证券请先在数据管理里下载）")
     daily = quality.flag_anomalies(daily, p)
-    if p.exclude_anomaly_days:
-        drop = daily["anomaly_flag"] & daily["included"]
+    if p.exclude_data_issue_days:
+        drop = daily["data_issue"] & daily["included"]
         for sym, day in zip(daily.loc[drop, "symbol"], daily.loc[drop, "date"], strict=True):
-            excluded.append({"symbol": sym, "date": day, "reason": "异常日（已设置剔除）"})
-        daily["included"] = daily["included"] & ~daily["anomaly_flag"]
+            excluded.append({"symbol": sym, "date": day, "reason": "数据异常日（已设置剔除）"})
+        daily["included"] = daily["included"] & ~daily["data_issue"]
     swings = pd.DataFrame(swing_rows)
     for c in ("start", "end", "confirm"):
         if c in swings.columns:
@@ -236,6 +251,7 @@ def build_report(
             f"swing_capturable_pct_{sfx}": med[f"swing_capturable_pct_{sfx}"],
             f"swing_capturable_pct_{sfx}_mean": mean[f"swing_capturable_pct_{sfx}"],
             "capturable_days_ratio": days_ratio[p.score_k].reindex(med.index),
+            "conversion": aggregate.conversion(med, mean, p.score_k),
             "vwap_crosses": med["vwap_crosses"],
             "missing_ratio": med["missing_ratio"],
             "dollar_vol": med["dollar_vol"],

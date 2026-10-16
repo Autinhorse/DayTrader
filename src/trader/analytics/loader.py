@@ -13,9 +13,11 @@ from datetime import date, timedelta
 import numpy as np
 import polars as pl
 
+from trader.analytics.cleaning import CleanResult, clean_day, resample_close
 from trader.analytics.daily_metrics import Bars, DayInput
 from trader.analytics.extended_hours import EthDay
 from trader.analytics.params import ReportParams
+from trader.core.timeutil import timeframe_ns
 from trader.core.trading_calendar import TradingDay
 from trader.data.corporate_actions import load_actions, split_factor
 from trader.data.history import HistoryService
@@ -38,9 +40,10 @@ def to_bars(df: pl.DataFrame, factor: float = 1.0) -> Bars:
     )
 
 
-def adr_series(ranges: np.ndarray, n: int) -> np.ndarray:
-    """第 i 天收盘后的 ADR（含第 i 天）：最近 n 个 R 的简单平均，不足 n 个为 nan。
-    R 为 nan 的日子（提前收盘）跳过，不占名额。"""
+def adr_series(ranges: np.ndarray, n: int, min_days: int | None = None) -> np.ndarray:
+    """第 i 天收盘后的 ADR（含第 i 天）：最近 n 个 R 的中位数，不足 min_days（默认 n）个为 nan。
+    R 为 nan 的日子（提前收盘）跳过，不占名额。用中位数，少数大行情日不会把它拉高。"""
+    need = n if min_days is None else min_days
     out = np.full(len(ranges), np.nan)
     window: list[float] = []
     for i, r in enumerate(ranges):
@@ -48,8 +51,8 @@ def adr_series(ranges: np.ndarray, n: int) -> np.ndarray:
             window.append(float(r))
             if len(window) > n:
                 window.pop(0)
-        if len(window) == n:
-            out[i] = sum(window) / n
+        if len(window) >= need:
+            out[i] = float(np.median(window))
     return out
 
 
@@ -64,9 +67,22 @@ class SymbolDays:
     path_close: dict[date, tuple[np.ndarray, np.ndarray]] = field(default_factory=dict)
 
 
+@dataclass
+class _Day:
+    td: TradingDay
+    factor: float
+    clean: CleanResult
+    raw_open: float
+    limit: float
+
+
 def load_symbol(
     history: HistoryService, symbol: str, start: date, end: date, p: ReportParams
 ) -> SymbolDays:
+    """读一只证券区间内（及之前 ADR 需要的）每天的 bar，按决策 0011 清洗后组装每日输入。
+
+    清洗用的离群阈值 = print_filter_adr × 原始振幅的 ADR（之前不足 5 天时用当天原始振幅），
+    清洗后的振幅再算报表用的 ADR，所以坏数据既不影响摆动，也不影响 ADR。"""
     cal = history.cal
     out = SymbolDays(symbol)
     have = set(history.coverage(symbol))
@@ -80,59 +96,87 @@ def load_symbol(
     out.no_data = [d.day for d in in_range if d.day not in have]
 
     actions = load_actions(history.data_dir)
-    factors = {d.day: split_factor(actions, symbol, d.day, end) for d in days}
-    daily = []
-    for d in days:
-        df = history.day_bars(symbol, "1d", d, "rth")
-        if df.is_empty():
+    windows = p.bad_windows or ()
+    loaded: list[_Day] = []
+    raw_ranges: list[float] = []
+    for td in days:
+        m1df = history.day_bars(symbol, "1m", td, "rth")
+        if m1df.is_empty():
+            if td.day >= start:
+                out.no_data.append(td.day)
             continue
-        f = factors[d.day]
-        daily.append((d, df["high"][0] / f, df["low"][0] / f, df["close"][0] / f))
-    if not daily:
+        f = split_factor(actions, symbol, td.day, end)
+        m1 = to_bars(m1df, f)
+        raw_rng = float(m1.high.max() - m1.low.min())
+        prior = adr_series(np.array(raw_ranges), p.adr_days, min_days=5)
+        limit = p.print_filter_adr * (
+            prior[-1] if len(prior) and math.isfinite(prior[-1]) else raw_rng
+        )
+        raw_ranges.append(np.nan if td.early_close else raw_rng)
+        fine_df = history.day_bars(symbol, "1s", td, "rth")
+        fine = to_bars(fine_df, f) if not fine_df.is_empty() else _empty()
+        win = [w.ns_range() for w in windows if w.applies(symbol, td.day)]
+        res = clean_day(m1, fine, limit, win) if len(fine) else CleanResult(fine, m1, 0, 0, 0)
+        if len(res.m1) == 0:
+            if td.day >= start:
+                out.no_data.append(td.day)
+            continue
+        loaded.append(_Day(td, f, res, float(m1df["open"][0]), limit))
+    if not loaded:
         return out
-    rng = np.array([np.nan if x[0].early_close else x[1] - x[2] for x in daily])
-    cl = np.array([x[3] for x in daily])
+    rng = np.array(
+        [
+            np.nan if d.td.early_close else d.clean.m1.high.max() - d.clean.m1.low.min()
+            for d in loaded
+        ]
+    )
     adr = adr_series(rng, p.adr_days)
+    path_ns = timeframe_ns(p.path_bar_size)
 
-    first = next((i for i, x in enumerate(daily) if x[0].day >= start), len(daily))
+    first = next((i for i, d in enumerate(loaded) if d.td.day >= start), len(loaded))
     prev_eth: EthDay | None = None  # 前一交易日的扩展时段
     if p.include_extended_hours and first > 0:
-        td0 = daily[first - 1][0]
-        prev_eth = _eth(history, symbol, td0, factors[td0.day], p)
-    for i, (td, *_rest) in enumerate(daily):
+        d0 = loaded[first - 1]
+        prev_eth = _eth(history, symbol, d0.td, d0.factor, p)
+    for i, d in enumerate(loaded):
         if i < first:
             continue
-        f = factors[td.day]
+        td = d.td
         day_adr = float(adr[i - 1]) if i > 0 and math.isfinite(adr[i - 1]) else math.nan
-        pc = float(cl[i - 1]) if i > 0 else math.nan
+        pc = float(loaded[i - 1].clean.m1.close[-1]) if i > 0 else math.nan
         if not math.isfinite(day_adr):
             out.adr_missing.append(td.day)
-        m1 = history.day_bars(symbol, "1m", td, "rth")
-        pb = history.day_bars(symbol, p.path_bar_size, td, "rth")
-        if m1.is_empty():
-            out.no_data.append(td.day)
-            continue
         if td.early_close:
             out.early_close.add(td.day)
-        bars = to_bars(m1, f)
-        path = to_bars(pb, f)
+        m1 = d.clean.m1
+        path = resample_close(m1, td.open, path_ns)
         out.path_close[td.day] = (path.ts, path.close)
+        fine = d.clean.fine
         out.inputs[td.day] = DayInput(
             day_open=td.open,
             day_close=td.close,
-            m1=bars,
+            m1=m1,
             path_bars=path,
             adr=day_adr,
             pc=pc,
-            fine=_fine_loader(history, symbol, td, f),
-            raw_open=float(m1["open"][0]),
+            fine=_fine_slicer(fine) if len(fine) else None,
+            raw_open=d.raw_open,
+            fixed_prints=d.clean.fixed_prints,
+            changed_minutes=d.clean.changed_minutes,
+            window_minutes=d.clean.window_minutes,
+            filter_limit=d.limit,
         )
         if p.include_extended_hours:
-            eth = _eth(history, symbol, td, f, p)
+            eth = _eth(history, symbol, td, d.factor, p)
             out.eth[td.day] = eth
             eth.prev_post_last = prev_eth.post_last if prev_eth is not None else math.nan
             prev_eth = eth
     return out
+
+
+def _empty() -> Bars:
+    e = np.empty(0)
+    return Bars(np.empty(0, dtype=np.int64), e, e, e, e, e, e)
 
 
 def _eth(history: HistoryService, symbol: str, td: TradingDay, f: float, p: ReportParams) -> EthDay:
@@ -140,17 +184,10 @@ def _eth(history: HistoryService, symbol: str, td: TradingDay, f: float, p: Repo
     return EthDay.from_frame(ext, f, p.eth_min_bar_volume)
 
 
-def _fine_loader(history: HistoryService, symbol: str, td: TradingDay, factor: float):  # noqa: ANN202
-    """按需读取这一天的 1 秒 bar（只有摆动算法遇到歧义分钟时才读，读一次后缓存）。"""
-    cache: dict[str, Bars] = {}
+def _fine_slicer(b: Bars):  # noqa: ANN202
+    """摆动算法遇到歧义分钟时，取这一分钟的（清洗后的）1 秒 bar。"""
 
     def fine(t0: int, t1: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
-        if "b" not in cache:
-            df = history.day_bars(symbol, "1s", td, "rth")
-            if df.is_empty():
-                return None
-            cache["b"] = to_bars(df, factor)
-        b = cache["b"]
         i, j = np.searchsorted(b.ts, [t0, t1])
         return b.ts[i:j], b.open[i:j], b.high[i:j], b.low[i:j]
 

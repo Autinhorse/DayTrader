@@ -38,25 +38,44 @@ def outlier_bars(m1: Bars, limit: float, skip_before: int = 0) -> int:
 
 
 def flag_anomalies(daily: pd.DataFrame, p: ReportParams) -> pd.DataFrame:
-    """加 anomaly_flag、anomaly_reason 两列。摆动次数的中位数只用参与汇总的日子
-    （提前收盘、ADR 不足的日子不算）。"""
+    """标记两类日子（规范 3.7）：
+
+    - 数据异常 data_issue：落在坏数据时段，或清洗时改动了 1 分钟 bar。已经在计算前处理掉，
+      列出来供核对清洗是否合理。
+    - 行为特殊日 special_day：摆动密度过高、摆动次数远超平常（安静来回震荡的日子、财报日），
+      或清洗后仍有 1 分钟价格尖刺（持续一分钟以上，多半是消息行情）。数据没问题，只标记。
+
+    摆动次数的中位数只用参与汇总的日子（提前收盘、ADR 不足的日子不算）。"""
     n_col = f"swing_n_{ksuffix(p.score_k)}"
     base = daily[daily["included"]].groupby("symbol")[n_col].median()
     med = cast(pd.Series, daily["symbol"]).map(cast(dict, base.to_dict()))
+    win = daily["window_minutes"] > 0
+    chg = daily["changed_minutes"] > 0
+    outl = daily["outlier_bars"] > 0
     dens = daily["swing_density"] > p.anomaly_swing_density
     many = (daily[n_col] > med * p.anomaly_swing_multiple) & (daily[n_col] >= p.anomaly_min_swings)
-    outl = daily["outlier_bars"] > 0
-    reasons = []
+    data_r, beh_r = [], []
     for i in range(len(daily)):
         r = []
+        if win.iat[i]:
+            r.append(f"坏数据时段删除 {daily['window_minutes'].iat[i]:.0f} 分钟")
+        if chg.iat[i]:
+            r.append(
+                f"修正离群成交 {daily['fixed_prints'].iat[i]:.0f} 笔"
+                f"（影响 {daily['changed_minutes'].iat[i]:.0f} 分钟）"
+            )
+        data_r.append("；".join(r))
+        b = []
         if dens.iat[i]:
-            r.append(f"摆动密度 {daily['swing_density'].iat[i]:.1f}")
+            b.append(f"摆动密度 {daily['swing_density'].iat[i]:.1f}")
         if many.iat[i]:
-            r.append(f"摆动次数 {daily[n_col].iat[i]:.0f}（该证券中位数 {med.iat[i]:.0f}）")
+            b.append(f"摆动次数 {daily[n_col].iat[i]:.0f}（该证券中位数 {med.iat[i]:.0f}）")
         if outl.iat[i]:
-            r.append(f"离群 1 分钟 bar {daily['outlier_bars'].iat[i]:.0f} 根")
-        reasons.append("；".join(r))
+            b.append(f"1 分钟价格尖刺 {daily['outlier_bars'].iat[i]:.0f} 根")
+        beh_r.append("；".join(b))
     out = daily.copy()
-    out["anomaly_flag"] = dens | many | outl
-    out["anomaly_reason"] = reasons
+    out["data_issue"] = win | chg
+    out["data_reason"] = data_r
+    out["special_day"] = dens | many | outl
+    out["special_reason"] = beh_r
     return out

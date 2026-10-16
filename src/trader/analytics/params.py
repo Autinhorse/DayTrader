@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from trader.analytics.cleaning import BadWindow
 
 
 def ksuffix(k: float) -> str:
@@ -14,9 +18,9 @@ def ksuffix(k: float) -> str:
 class ReportParams:
     benchmark_tickers: tuple[str, ...] = ("SPY", "QQQ")
     path_bar_size: str = "5m"  # 路程、效率比、自相关、方差比用的周期
-    adr_days: int = 21  # ADR：过去 adr_days 个常规交易日（不含提前收盘日）振幅的简单平均
+    adr_days: int = 21  # ADR：过去 adr_days 个常规交易日（不含提前收盘日）振幅的中位数
     swing_thresholds_adr: tuple[float, ...] = (0.1, 0.15, 0.25)
-    score_k: float = 0.15  # 打分、时段指标、异常日检测用的摆动阈值
+    score_k: float = 0.25  # 打分、时段指标、异常日检测用的摆动阈值
     vwap_cross_min_hold: int = 3  # 分钟（钟表时间）
     # 单边成本（基点），按当日实际开盘价（未复权）分档：(价格上限, 基点)，最后一档的上限为 None
     cost_tiers_bps: tuple[tuple[float | None, float], ...] = (
@@ -29,15 +33,20 @@ class ReportParams:
     min_dollar_vol: float = 20e6
     min_tickers_for_scores: int = 15
     time_buckets_min: int = 30
-    # 异常日检测（规范 3.7）
-    # Σ 摆动幅度 / 当日振幅（score_k 阈值）。2026-07~09 的 22 只证券：中位数约 5，99 分位约 12
-    anomaly_swing_density: float = 12.0
+    # 数据清洗（决策 0011）：1 秒 bar 偏离前后各 30 根收盘价中位数超过该 ADR 倍数的价格视为离群
+    print_filter_adr: float = 0.3
+    # 坏数据时段；None = 读 config/bad_data_windows.yaml
+    bad_windows: tuple[BadWindow, ...] | None = None
+    # 特殊日（规范 3.7）：Σ 摆动幅度 / 当日振幅（score_k 阈值）超过此值
+    # 2026-07~09 的 22 只证券（0.25 ADR）：中位数约 2.9，99 分位约 7.5
+    anomaly_swing_density: float = 7.5
     # swing_n 超过该证券中位数的倍数，且至少 anomaly_min_swings 次
     anomaly_swing_multiple: float = 4.0
     anomaly_min_swings: int = 10
-    anomaly_outlier_adr: float = 0.5  # 1 分钟最高/最低价偏离前后各 5 分钟收盘价中位数的 ADR 倍数
+    # 价格尖刺：清洗后 1 分钟最高/最低价偏离前后各 5 分钟收盘价中位数的 ADR 倍数
+    anomaly_outlier_adr: float = 0.5
     anomaly_skip_open_min: int = 5  # 离群 bar 判断跳过开盘后几分钟
-    exclude_anomaly_days: bool = False  # 人工确认是数据问题后再打开
+    exclude_data_issue_days: bool = False  # 只剔除"数据异常"日；行为特殊日从不剔除
     # 杠杆 ETF → (标的, 名义杠杆倍数)
     leveraged_pairs: dict[str, tuple[str, float]] = field(default_factory=dict)
     include_extended_hours: bool = True
@@ -68,6 +77,7 @@ class ReportParams:
         }
     )
     detail_count: int = 3  # 单只证券详情默认取综合得分前几名
+    review_plot_max: int = 16  # 数据异常日、行为特殊日各最多画几张核对图
 
     def cost_pct(self, price: float) -> float:
         """单边成本，百分数（5bp = 0.05）。"""

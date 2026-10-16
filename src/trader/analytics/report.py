@@ -15,7 +15,8 @@ import numpy as np
 import pandas as pd
 from matplotlib.figure import Figure
 
-from trader.analytics.daily_metrics import cumulative_vwap
+from trader.analytics.cleaning import clean_day
+from trader.analytics.daily_metrics import Bars, cumulative_vwap
 from trader.analytics.frames import corr, included, rows
 from trader.analytics.loader import to_bars
 from trader.analytics.params import ksuffix
@@ -53,8 +54,14 @@ def param_summary(rep: VolReport) -> pd.DataFrame:
         ("未参与汇总的日子", len(rep.excluded)),
         ("疑似停牌（只标记，不剔除）", int(d["possible_halt"].to_numpy().sum())),
         (
-            "异常日（" + ("已剔除" if p.exclude_anomaly_days else "只标记，不剔除") + "）",
-            int(d["anomaly_flag"].to_numpy().sum()),
+            "数据异常日（已清洗；" + ("并剔除" if p.exclude_data_issue_days else "不剔除") + "）",
+            int(d["data_issue"].to_numpy().sum()),
+        ),
+        ("行为特殊日（只标记）", int(d["special_day"].to_numpy().sum())),
+        (
+            "数据清洗",
+            f"离群成交阈值 {p.print_filter_adr:g} × ADR；坏数据时段 {len(p.bad_windows or ())} 个"
+            "（config/bad_data_windows.yaml）",
         ),
         ("1 秒数据也分不出先后的分钟", int(d["ambiguous_minutes"].to_numpy().sum())),
         (
@@ -70,7 +77,7 @@ def param_summary(rep: VolReport) -> pd.DataFrame:
         ("价格口径", f"拆股复权到 {rep.end}（成本分档按当天实际价格）"),
         ("摆动阈值（ADR 倍数）", ", ".join(f"{k:g}" for k in p.swing_thresholds_adr)),
         ("打分用阈值", f"{p.score_k:g} × ADR"),
-        ("ADR", f"{p.adr_days} 日常规时段振幅的简单平均（不含提前收盘日），用前一交易日的值"),
+        ("ADR", f"{p.adr_days} 日常规时段振幅的中位数（清洗后，不含提前收盘日），用前一交易日的值"),
         ("单边成本假设", tiers),
         ("扩展时段参考", "计算（不参与打分）" if p.include_extended_hours else "不计算"),
     ]
@@ -79,7 +86,8 @@ def param_summary(rep: VolReport) -> pd.DataFrame:
 
 COST_NOTE = (
     "当前数据不含报价，交易成本是按开盘价分档的假设值（见参数摘要），不是实测价差。"
-    "`swing_capturable_pct` 扣除了确认转折时损失的 2θ 和买卖两次成本。"
+    "`swing_capturable_pct` 扣除了确认转折时损失的 2θ 和买卖两次成本，但没有计入反应延迟和滑点，"
+    "**是用来在证券之间比较的相对指数，不是能实际赚到的收益**；阈值越小高估越多。"
 )
 
 
@@ -251,18 +259,36 @@ def typical_day(rep: VolReport, symbol: str) -> date | None:
     return d.loc[dist.idxmin(), "date"]
 
 
-def _day_bars(rep: VolReport, symbol: str, day: date):  # noqa: ANN202
-    """一天的 1 分钟 bar，复权口径与报表相同。"""
+def _day_bars(rep: VolReport, symbol: str, day: date) -> tuple[Bars, Bars]:
+    """一天的 1 分钟 bar（原始、清洗后），复权口径与报表相同。清洗按当天记录的阈值重做一遍。"""
     assert rep.history is not None
-    td = rep.history.cal.trading_day(day)
-    f = split_factor(load_actions(rep.history.data_dir), symbol, day, rep.end)
-    return to_bars(rep.history.day_bars(symbol, "1m", td, "rth"), f)
+    h = rep.history
+    td = h.cal.trading_day(day)
+    f = split_factor(load_actions(h.data_dir), symbol, day, rep.end)
+    raw = to_bars(h.day_bars(symbol, "1m", td, "rth"), f)
+    fine_df = h.day_bars(symbol, "1s", td, "rth")
+    if fine_df.is_empty():
+        return raw, raw
+    row = rows(rep.daily, (rep.daily["symbol"] == symbol) & (rep.daily["date"] == day))
+    limit = float(row["filter_limit"].iloc[0]) if len(row) else math.nan
+    win = [w.ns_range() for w in rep.params.bad_windows or () if w.applies(symbol, day)]
+    return raw, clean_day(raw, to_bars(fine_df, f), limit, win).m1
 
 
-def plot_day(ax: Any, rep: VolReport, symbol: str, day: date, compact: bool = False) -> None:
-    """在 ax 上画一天的 1 分钟价格、VWAP、已确认的摆动（实线）和未确认的最后一段（虚线）。"""
-    b = _day_bars(rep, symbol, day)
+def plot_day(
+    ax: Any, rep: VolReport, symbol: str, day: date, compact: bool = False, note: str = ""
+) -> None:
+    """在 ax 上画一天的 1 分钟价格、VWAP、已确认的摆动（实线）和未确认的最后一段（虚线）。
+    清洗改动过的地方，原始的高低价用灰色画在下面。"""
+    raw, b = _day_bars(rep, symbol, day)
     t = pd.to_datetime(b.ts, unit="ns", utc=True).tz_convert(NY)
+    j = np.searchsorted(b.ts, raw.ts).clip(0, max(len(b) - 1, 0))
+    same = (b.ts[j] == raw.ts) & np.isclose(b.high[j], raw.high) & np.isclose(b.low[j], raw.low)
+    if len(b) and not same.all():
+        diff = ~same
+        tr = pd.to_datetime(raw.ts[diff], unit="ns", utc=True).tz_convert(NY)
+        ax.vlines(tr, raw.low[diff], raw.high[diff], color="#999999", lw=1.5,
+                  label="清洗前的高低（被改动的分钟）")  # fmt: skip
     ax.fill_between(t, b.low, b.high, color="#9ec3ea", alpha=0.5, lw=0, label="1 分钟高低")
     ax.plot(t, b.close, color=MAIN_COLOR, lw=0.8, label="收盘价")
     ax.plot(t, cumulative_vwap(b), color="#ff7f0e", lw=1.2, label="VWAP")
@@ -285,7 +311,7 @@ def plot_day(ax: Any, rep: VolReport, symbol: str, day: date, compact: bool = Fa
     row = rows(rep.daily, (rep.daily["symbol"] == symbol) & (rep.daily["date"] == day)).iloc[0]
     adr = row["adr"]
     if compact:
-        title = f"{symbol} {day}：{row['anomaly_reason'] or ''}"
+        title = f"{symbol} {day}：{note}"
     elif math.isfinite(adr):
         title = (
             f"{symbol} {day}  ADR {adr:.2f}，阈值 θ = {k * adr:.2f}，摆动 {len(done)} 次，"
@@ -312,19 +338,26 @@ def fig_detail_day(rep: VolReport, symbol: str, day: date | None = None) -> Figu
     return fig
 
 
-def figs_anomaly_days(rep: VolReport, per_fig: int = 8) -> list[Figure]:
-    """每个异常日一张小图（每张大图 per_fig 个），供人工核对是不是数据问题。"""
-    a = rep.anomalies
-    out = []
+def figs_review_days(rep: VolReport, kind: str, per_fig: int = 8) -> list[Figure]:
+    """核对图：kind="data" 数据异常日（按清洗改动的分钟数从多到少），kind="special" 行为特殊日。
+    各最多 review_plot_max 张，每张大图 per_fig 个。"""
+    if kind == "data":
+        t = rep.data_issues.sort_values(["changed_minutes", "fixed_prints"], ascending=False)
+        notes = t["data_reason"]
+    else:
+        t = rep.special_days
+        notes = t["special_reason"]
+    t = t.head(rep.params.review_plot_max)
+    out: list[Figure] = []
     if rep.history is None:
         return out
-    for i in range(0, len(a), per_fig):
-        part = a.iloc[i : i + per_fig]
+    for i in range(0, len(t), per_fig):
+        part = t.iloc[i : i + per_fig]
         n = len(part)
         nrows = (n + 1) // 2
         fig, axes = plt.subplots(nrows, 2, figsize=(14, 3.2 * nrows), squeeze=False)
-        for ax, (_, r) in zip(axes.flat, part.iterrows(), strict=False):
-            plot_day(ax, rep, str(r["symbol"]), r["date"], compact=True)
+        for ax, (idx, r) in zip(axes.flat, part.iterrows(), strict=False):
+            plot_day(ax, rep, str(r["symbol"]), r["date"], compact=True, note=str(notes.at[idx]))
         for ax in list(axes.flat)[n:]:
             ax.axis("off")
         fig.tight_layout()

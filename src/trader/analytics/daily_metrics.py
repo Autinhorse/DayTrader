@@ -42,6 +42,10 @@ class DayInput:
     pc: float  # 前一日常规时段收盘价（复权价格）；没有为 nan
     fine: FineBars | None = None
     raw_open: float = math.nan  # 当天实际开盘价（未复权），成本分档用；nan 表示和 m1 相同
+    fixed_prints: int = 0  # 清洗：被修正或删除的 1 秒 bar 数（决策 0011）
+    changed_minutes: int = 0  # 清洗：开高低收因此改变的 1 分钟 bar 数
+    window_minutes: int = 0  # 清洗：落在坏数据时段里被删掉的 1 分钟 bar 数
+    filter_limit: float = math.nan  # 清洗用的离群阈值（价格单位）
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,6 +212,10 @@ def compute_day(inp: DayInput, p: ReportParams) -> DayResult:
         else math.nan,
     }
     met["cost_pct"] = p.cost_pct(met["raw_open"])
+    met["fixed_prints"] = float(inp.fixed_prints)
+    met["changed_minutes"] = float(inp.changed_minutes)
+    met["window_minutes"] = float(inp.window_minutes)
+    met["filter_limit"] = inp.filter_limit
 
     swings: dict[float, list[Swing]] = {}
     legs: dict[float, LastLeg] = {}

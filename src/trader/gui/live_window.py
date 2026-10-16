@@ -19,18 +19,19 @@ from typing import Any
 
 import polars as pl
 from PySide6.QtCore import QSettings, Qt, QTimer
+from PySide6.QtGui import QDoubleValidator
 from PySide6.QtNetwork import QAbstractSocket, QTcpSocket
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QDockWidget,
-    QDoubleSpinBox,
     QFormLayout,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QMainWindow,
     QMessageBox,
@@ -83,6 +84,34 @@ def _time(ns: Any) -> str:
     if not isinstance(ns, int) or ns <= 0:
         return ""
     return from_ns(ns).strftime("%H:%M:%S")  # 纽约时间
+
+
+class PriceEdit(QLineEdit):
+    """价格输入框：空着表示不填；只接受非负数字。"""
+
+    def __init__(self, label: str) -> None:
+        super().__init__()
+        self.label = label
+        self.setPlaceholderText(f"{label}（不填留空）")
+        v = QDoubleValidator(0.0, 1_000_000.0, 4, self)
+        v.setNotation(QDoubleValidator.Notation.StandardNotation)
+        self.setValidator(v)
+
+    def valid(self) -> bool:
+        t = self.text().strip()
+        if not t:
+            return True
+        try:
+            return float(t) > 0
+        except ValueError:
+            return False
+
+    def price(self) -> float | None:
+        t = self.text().strip()
+        return float(t) if t and self.valid() else None
+
+    def setValue(self, x: float | None) -> None:  # noqa: N802 和 Qt 数字框的接口一致
+        self.setText("" if x is None else f"{x:g}")
 
 
 class LiveWindow(QMainWindow):
@@ -286,11 +315,11 @@ class LiveWindow(QMainWindow):
         self.o_qty.setRange(1, 100_000)
         self.o_type = QComboBox()
         self.o_type.addItems(["MKT", "LMT", "STP"])
-        self.o_limit, self.o_stop, self.o_tp, self.o_sl = (QDoubleSpinBox() for _ in range(4))
-        for sp in (self.o_limit, self.o_stop, self.o_tp, self.o_sl):
-            sp.setRange(0, 1_000_000)
-            sp.setDecimals(2)
-            sp.setSpecialValueText("-")
+        # 价格用普通输入框：空着就是不填。原来的数字框在显示"-"时直接打字会变成"-790"被丢掉，
+        # 括号单的止盈止损因此没有发出去（2026-10-16 模拟测试发现）
+        self.o_limit, self.o_stop, self.o_tp, self.o_sl = (
+            PriceEdit(t) for t in ("限价", "触发价", "止盈价", "止损价")
+        )
         self.o_rth = QCheckBox("盘前盘后（只能限价）")
         f.addRow("标的", self.o_symbol)
         side = QHBoxLayout()
@@ -326,8 +355,8 @@ class LiveWindow(QMainWindow):
         return True
 
     def order_command(self) -> dict[str, Any]:
-        def v(sp: QDoubleSpinBox) -> float | None:
-            return sp.value() or None
+        def v(e: PriceEdit) -> float | None:
+            return e.price()
 
         return {
             "symbol": self.o_symbol.currentText().strip().upper(),
@@ -342,14 +371,27 @@ class LiveWindow(QMainWindow):
         }
 
     def _submit_order(self) -> None:
+        bad = [e.label for e in (self.o_limit, self.o_stop, self.o_tp, self.o_sl) if not e.valid()]
+        if bad:
+            self.statusBar().showMessage("、".join(bad) + " 不是有效的价格，订单没有发出")
+            return
         o = self.order_command()
+        tp, sl = o["take_profit"], o["stop_loss"]
+        buy = o["side"] == "BUY"
+        if tp is not None and sl is not None and ((buy and tp <= sl) or (not buy and tp >= sl)):
+            self.statusBar().showMessage("止盈价和止损价方向反了，订单没有发出")
+            return
         px = o["limit"] or o["stop"] or "市价"
-        bracket = (
-            f"，止盈 {o['take_profit']} 止损 {o['stop_loss']}"
-            if o["take_profit"] or o["stop_loss"]
-            else ""
-        )
-        if self.confirm(f"{o['side']} {o['qty']} {o['symbol']} {o['type']} {px}{bracket}。下单？"):
+        if tp is None and sl is None:
+            bracket = "\n\n没有止盈、止损（单张订单，不是括号单）"
+        else:
+            bracket = (
+                f"\n\n括号单：止盈 {tp if tp is not None else '不设'}，"
+                f"止损 {sl if sl is not None else '不设'}"
+            )
+        if self.confirm(
+            f"{o['side']} {o['qty']} {o['symbol']} {o['type']} {px}{bracket}\n\n下单？"
+        ):
             self.send("manual_order", **o)
 
     def _cancel_selected(self) -> None:

@@ -185,6 +185,33 @@ def test_live_window(qtbot):
         230.5,
     )
     assert order["stop"] is None and order["take_profit"] is None
+    # 括号单：在空的价格框里直接打字（2026-10-16 发现原来的数字框会把输入丢掉）
+    from PySide6.QtTest import QTest
+
+    shown: list[str] = []
+    w.confirm = lambda text: shown.append(text) or True
+    w.o_type.setCurrentText("MKT")
+    w.o_limit.setValue(None)
+    w.o_side.setCurrentText("BUY")
+    w.o_tp.setFocus()
+    QTest.keyClicks(w.o_tp, "790")
+    QTest.keyClicks(w.o_sl, "750.5")
+    w._submit_order()
+    order = w.sent[-1]
+    assert (order["take_profit"], order["stop_loss"]) == (790.0, 750.5)
+    assert "括号单：止盈 790.0，止损 750.5" in shown[-1]
+    # 方向反了、或输入无效：不发命令
+    n = len(w.sent)
+    w.o_tp.setValue(700)
+    w._submit_order()
+    w.o_tp.setText("abc")
+    w._submit_order()
+    assert len(w.sent) == n
+    # 都不填：确认框写明不是括号单
+    w.o_tp.setValue(None)
+    w.o_sl.setValue(None)
+    w._submit_order()
+    assert "不是括号单" in shown[-1] and w.sent[-1]["take_profit"] is None
     # 取消确认时不发命令
     w.confirm = lambda text: False
     n = len(w.sent)

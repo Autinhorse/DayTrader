@@ -197,3 +197,9 @@ def test_main_window_smoke(qtbot, ds_with_runs, tmp_path):
     qtbot.addWidget(w2)
     assert len(w2.charts) == 2  # 打开的图表被恢复
     assert sorted(c.timeframe for _, c in w2.charts.values()) == ["1m", "5m"]
+    # 在测试里就销毁窗口：否则内嵌浏览器（QWebEngineView）留到解释器退出时才销毁，
+    # 那时 QApplication 已经没了，进程以访问冲突退出（退出码 139，测试本身都通过）
+    for x in (w, w2):
+        x.close()
+        x.deleteLater()
+    qtbot.wait(200)

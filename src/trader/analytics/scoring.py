@@ -33,31 +33,41 @@ def weighted(parts: Mapping[str, Any], weights: dict[str, float]) -> pd.Series:
     return acc
 
 
-def consistency(daily: pd.DataFrame, p: ReportParams) -> pd.Series:
+def consistency(daily: pd.DataFrame, k: float) -> pd.Series:
     """当日震荡分 = 当天 swing_n 和 1 − body_ratio 在所有证券、所有交易日中的百分位的平均；
     稳定性原值 = 当日震荡分 ≥ 50 的天数占比。"""
     d = included(daily)
-    n_col = f"swing_n_{ksuffix(p.score_k)}"
+    n_col = f"swing_n_{ksuffix(k)}"
     day_score = (pct_rank(d[n_col]) + pct_rank(1 - d["body_ratio"])) / 2
     hit = (day_score >= 50).astype(float).where(day_score.notna())
     return hit.groupby(d["symbol"]).mean()
 
 
-def score(med: pd.DataFrame, daily: pd.DataFrame, p: ReportParams) -> pd.DataFrame:
-    s = ksuffix(p.score_k)
-    activity = weighted({k: med[k] for k in p.activity_weights}, p.activity_weights)
+def score(
+    med: pd.DataFrame,
+    mean: pd.DataFrame,
+    days_ratio: pd.Series,
+    daily: pd.DataFrame,
+    p: ReportParams,
+    k: float | None = None,
+) -> pd.DataFrame:
+    """k：摆动阈值，默认 score_k（阈值敏感性表用其他阈值重算）。"""
+    k = p.score_k if k is None else k
+    s = ksuffix(k)
+    activity = weighted({c: med[c] for c in p.activity_weights}, p.activity_weights)
     rot_parts = {
-        "swing_n": med[f"swing_n_{s}"],
+        "swing_n": mean[f"swing_n_{s}"],
         "one_minus_body": 1 - med["body_ratio"],
         "vwap_crosses": med["vwap_crosses"],
     }
     rotation = weighted(rot_parts, p.rotation_weights)
     sv_parts = {
-        "swing_capturable_pct": med[f"swing_capturable_pct_{s}"],
+        "swing_capturable_pct": mean[f"swing_capturable_pct_{s}"],
+        "capturable_days_ratio": days_ratio.reindex(med.index),
         "swing_avg_pct": med[f"swing_avg_pct_{s}"],
     }
     swing_value = weighted(sv_parts, p.swing_value_weights)
-    cons_raw = consistency(daily, p).reindex(med.index)
+    cons_raw = consistency(daily, k).reindex(med.index)
     cons = pct_rank(cons_raw)
     out = pd.DataFrame(
         {
@@ -83,3 +93,28 @@ def score(med: pd.DataFrame, daily: pd.DataFrame, p: ReportParams) -> pd.DataFra
         / total,
     )
     return out
+
+
+def sensitivity(
+    med: pd.DataFrame,
+    mean: pd.DataFrame,
+    daily: pd.DataFrame,
+    p: ReportParams,
+    days_ratio: Mapping[float, pd.Series],
+) -> pd.DataFrame:
+    """每个摆动阈值下的 swing_n 均值、swing_capturable_pct 均值、capturable_days_ratio、
+    综合得分和名次（规范第 6 节第 4 项）。列为 (阈值, 字段) 两级。"""
+    parts = {}
+    for k in p.swing_thresholds_adr:
+        s = ksuffix(k)
+        sc = score(med, mean, days_ratio[k], daily, p, k)
+        parts[f"{k:g}"] = pd.DataFrame(
+            {
+                "swing_n_mean": mean[f"swing_n_{s}"],
+                "capturable_mean": mean[f"swing_capturable_pct_{s}"],
+                "capturable_days_ratio": days_ratio[k].reindex(med.index),
+                "score_total": sc["score_total"],
+                "rank": sc["score_total"].rank(ascending=False, method="min"),
+            }
+        )
+    return pd.concat(parts, axis=1, names=["k", "field"])

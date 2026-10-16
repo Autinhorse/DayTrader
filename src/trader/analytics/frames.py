@@ -14,3 +14,15 @@ def rows(df: pd.DataFrame, mask: Any) -> pd.DataFrame:
 def included(daily: pd.DataFrame) -> pd.DataFrame:
     """参与汇总的日子。"""
     return rows(daily, daily["included"])
+
+
+def col(df: pd.DataFrame, name: str) -> pd.Series:
+    return cast(pd.Series, df[name])
+
+
+def corr(a: Any, b: Any, rank: bool = False) -> float:
+    """两列的相关系数；rank=True 时先转名次（Spearman）。不需要 scipy。"""
+    x, y = cast(pd.Series, a), cast(pd.Series, b)
+    if rank:
+        x, y = x.rank(), y.rank()
+    return float(cast(Any, x.corr(y)))

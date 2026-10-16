@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 
 
 def ksuffix(k: float) -> str:
-    """摆动阈值的字段名后缀：0.25 → "k025"，0.5 → "k050"。"""
+    """摆动阈值的字段名后缀：0.1 → "k010"，0.15 → "k015"，0.25 → "k025"。"""
     return f"k{round(k * 100):03d}"
 
 
@@ -14,13 +14,11 @@ def ksuffix(k: float) -> str:
 class ReportParams:
     benchmark_tickers: tuple[str, ...] = ("SPY", "QQQ")
     path_bar_size: str = "5m"  # 路程、效率比、自相关、方差比用的周期
-    atr_days: int = 21
-    # 某日之前至少要有 atr_days × 该倍数个交易日的数据，否则当天 ATR 记为空
-    atr_warmup_factor: int = 3
-    swing_thresholds_atr: tuple[float, ...] = (0.25, 0.5)
-    score_k: float = 0.25  # 打分、时段指标用的摆动阈值
+    adr_days: int = 21  # ADR：过去 adr_days 个常规交易日（不含提前收盘日）振幅的简单平均
+    swing_thresholds_adr: tuple[float, ...] = (0.1, 0.15, 0.25)
+    score_k: float = 0.15  # 打分、时段指标、异常日检测用的摆动阈值
     vwap_cross_min_hold: int = 3  # 分钟（钟表时间）
-    # 单边成本（基点），按当日开盘价分档：(价格上限, 基点)，最后一档的上限为 None
+    # 单边成本（基点），按当日实际开盘价（未复权）分档：(价格上限, 基点)，最后一档的上限为 None
     cost_tiers_bps: tuple[tuple[float | None, float], ...] = (
         (20.0, 10.0),
         (100.0, 5.0),
@@ -31,6 +29,20 @@ class ReportParams:
     min_dollar_vol: float = 20e6
     min_tickers_for_scores: int = 15
     time_buckets_min: int = 30
+    # 异常日检测（规范 3.7）
+    # Σ 摆动幅度 / 当日振幅（score_k 阈值）。2026-07~09 的 22 只证券：中位数约 5，99 分位约 12
+    anomaly_swing_density: float = 12.0
+    # swing_n 超过该证券中位数的倍数，且至少 anomaly_min_swings 次
+    anomaly_swing_multiple: float = 4.0
+    anomaly_min_swings: int = 10
+    anomaly_outlier_adr: float = 0.5  # 1 分钟最高/最低价偏离前后各 5 分钟收盘价中位数的 ADR 倍数
+    anomaly_skip_open_min: int = 5  # 离群 bar 判断跳过开盘后几分钟
+    exclude_anomaly_days: bool = False  # 人工确认是数据问题后再打开
+    # 杠杆 ETF → (标的, 名义杠杆倍数)
+    leveraged_pairs: dict[str, tuple[str, float]] = field(default_factory=dict)
+    include_extended_hours: bool = True
+    eth_min_bar_volume: float = 100  # 扩展时段成交量低于此值的 1 分钟 bar 不参与取价
+    compare_periods: tuple[str, str] | None = None  # 另一个日期区间，做排名对比
     score_weights: dict[str, float] = field(
         default_factory=lambda: {
             "activity": 0.30,
@@ -39,15 +51,21 @@ class ReportParams:
             "consistency": 0.15,
         }
     )
+    # 活跃度：range_pct 中位数、rv_5min_pct 中位数
     activity_weights: dict[str, float] = field(
         default_factory=lambda: {"range_pct": 0.5, "rv_5min_pct": 0.5}
     )
-    # 震荡度：摆动次数、1 − body_ratio、VWAP 穿越（规范 5.2）
+    # 震荡度：swing_n 均值、1 − body_ratio 中位数、vwap_crosses 中位数（规范 5.2）
     rotation_weights: dict[str, float] = field(
         default_factory=lambda: {"swing_n": 0.5, "one_minus_body": 0.25, "vwap_crosses": 0.25}
     )
+    # 摆动价值：swing_capturable_pct 均值、capturable_days_ratio、swing_avg_pct 中位数
     swing_value_weights: dict[str, float] = field(
-        default_factory=lambda: {"swing_capturable_pct": 0.6, "swing_avg_pct": 0.4}
+        default_factory=lambda: {
+            "swing_capturable_pct": 0.4,
+            "capturable_days_ratio": 0.3,
+            "swing_avg_pct": 0.3,
+        }
     )
     detail_count: int = 3  # 单只证券详情默认取综合得分前几名
 
@@ -57,7 +75,3 @@ class ReportParams:
             if cap is None or price < cap:
                 return bps / 100
         return self.cost_tiers_bps[-1][1] / 100
-
-    @property
-    def warmup_days(self) -> int:
-        return self.atr_days * self.atr_warmup_factor

@@ -845,9 +845,9 @@ res.open_in_ui()                                                      # 在界�
 
 Notebook 接口是补充手段，用于界面没有覆盖的自由分析；日常的回测、对比和复盘都在界面完成。接口要稳定，返回值一律是 DataFrame 或简单对象。
 
-### 10.8 日内波动报表（决策 0009）
+### 10.8 日内波动报表（决策 0009、0010）
 
-研究工具，不属于开发阶段。输入一组证券和日期范围，计算每日的幅度、形态、路程、摆动（ZigZag，阈值为 ATR 倍数）指标，按证券取中位数，在本批证券中做百分位打分（活跃度、震荡度、摆动价值、稳定性）。规范：`docs/intraday_volatility_report_spec.md`；代码 `trader.analytics`（`build_report(tickers, start, end, params)`）；notebook `user/notebooks/日内波动报表.ipynb`。
+研究工具，不属于开发阶段。输入一组证券和日期范围，只用常规时段计算每日的幅度、形态、路程、摆动（ZigZag，阈值为 ADR 倍数，ADR 是常规时段振幅的平均，不含隔夜跳空）指标，按证券汇总，在本批证券中做百分位打分（活跃度、震荡度、摆动价值、稳定性）。另外标记异常日（错误成交造成的虚假摆动）并出核对图；杠杆 ETF 与标的对照、扩展时段（跳空拆解、盘前振幅）、阈值敏感性、多区间对比只作参考。价格按拆股复权到区间末日。规范：`docs/intraday_volatility_report_spec.md`；代码 `trader.analytics`（`build_report(tickers, start, end, params)`）；notebook `user/notebooks/日内波动报表.ipynb`。
 
 ### 10.7 研究工作流界面
 

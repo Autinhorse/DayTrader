@@ -1,4 +1,4 @@
-"""每只证券、每个交易日的指标（规范第 3 节）。输入是一天的常规时段 bar（原始价格，numpy 数组），
+"""每只证券、每个交易日的指标（规范第 3 节）。输入是一天的常规时段 bar（复权价格，numpy 数组），
 输出是标量字典、摆动明细和时段指标。缺失的分钟不填充：收益率只在真实存在的 bar 之间计算。
 """
 
@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from trader.analytics.params import ReportParams, ksuffix
+from trader.analytics.quality import outlier_bars
 from trader.analytics.swings import FineBars, Swing, find_swings
 
 MIN_NS = 60 * 10**9
@@ -37,15 +38,27 @@ class DayInput:
     day_close: int
     m1: Bars
     path_bars: Bars  # path_bar_size 周期（默认 5 分钟）
-    atr: float  # 前一交易日的 ATR，当天原始价格口径；预热不足为 nan
-    pc: float  # 前一日常规时段收盘价，当天原始价格口径；没有为 nan
+    adr: float  # 前一交易日的 ADR（复权价格）；之前的数据不足 adr_days 天为 nan
+    pc: float  # 前一日常规时段收盘价（复权价格）；没有为 nan
     fine: FineBars | None = None
+    raw_open: float = math.nan  # 当天实际开盘价（未复权），成本分档用；nan 表示和 m1 相同
+
+
+@dataclass(frozen=True, slots=True)
+class LastLeg:
+    """收盘时还没确认的最后一段：从最后一个转折点到收盘价。"""
+
+    start_ts: int
+    end_ts: int  # 最后一根 bar 的开始时间
+    start_price: float
+    end_price: float
 
 
 @dataclass(frozen=True, slots=True)
 class DayResult:
     metrics: dict[str, float]
     swings: dict[float, list[Swing]]  # 阈值 k → 摆动
+    last_legs: dict[float, LastLeg]  # 阈值 k → 未确认的最后一段
     buckets: list[dict[str, float]]
 
 
@@ -149,7 +162,7 @@ def compute_day(inp: DayInput, p: ReportParams) -> DayResult:
     lo = float(m1.low.min())
     c = float(m1.close[-1])
     rng = h - lo
-    atr = inp.atr
+    adr = inp.adr
     expected = (inp.day_close - inp.day_open) // MIN_NS
     pb = inp.path_bars
     path_ns = int(np.median(np.diff(pb.ts))) if len(pb) > 1 else 5 * MIN_NS
@@ -165,10 +178,12 @@ def compute_day(inp: DayInput, p: ReportParams) -> DayResult:
         "high": h,
         "low": lo,
         "close": c,
-        "atr": atr,
+        "adr": adr,
+        "raw_open": inp.raw_open if math.isfinite(inp.raw_open) else o,
         "range_pct": rng / o * 100,
-        "range_atr": _ratio(rng, atr),
-        "gap_atr": _ratio(o - inp.pc, atr) if math.isfinite(inp.pc) else math.nan,
+        "range_adr": _ratio(rng, adr),
+        "adr_pct": adr / o * 100,
+        "gap_adr": _ratio(o - inp.pc, adr) if math.isfinite(inp.pc) else math.nan,
         "rv_5min_pct": float(np.sqrt((r_path**2).sum()) * 100) if len(r_path) else math.nan,
         "parkinson_pct": (math.log(h) - math.log(lo)) / math.sqrt(4 * math.log(2)) * 100,
         "dollar_vol": float((px * m1.volume).sum()),
@@ -184,31 +199,45 @@ def compute_day(inp: DayInput, p: ReportParams) -> DayResult:
         "ac1": autocorr1(r_path),
         "vr_3": variance_ratio(pb.ts, pb.close, inp.day_open, path_ns, 3),
         "vwap_crosses": float(vwap_crosses(m1, vwap, p.vwap_cross_min_hold, inp.day_close)),
-        "cost_pct": p.cost_pct(o),
+        "outlier_bars": float(
+            outlier_bars(
+                m1, p.anomaly_outlier_adr * adr, inp.day_open + p.anomaly_skip_open_min * MIN_NS
+            )
+        )
+        if math.isfinite(adr)
+        else math.nan,
     }
+    met["cost_pct"] = p.cost_pct(met["raw_open"])
 
     swings: dict[float, list[Swing]] = {}
+    legs: dict[float, LastLeg] = {}
     ambiguous = 0
-    for k in p.swing_thresholds_atr:
+    for k in p.swing_thresholds_adr:
         sfx = ksuffix(k)
-        theta = k * atr if math.isfinite(atr) else math.nan
-        sw, amb = (
-            find_swings(m1.ts, m1.open, m1.high, m1.low, theta, MIN_NS, inp.fine)
-            if math.isfinite(theta)
-            else ([], 0)
-        )
-        ambiguous += amb
-        swings[k] = sw
-        met.update(_swing_stats(sw, sfx, theta, atr, met["cost_pct"]))
+        theta = k * adr if math.isfinite(adr) else math.nan
+        run = find_swings(m1.ts, m1.open, m1.high, m1.low, theta, MIN_NS, inp.fine)
+        ambiguous += run.ambiguous
+        swings[k] = run.swings
+        met.update(_swing_stats(run.swings, sfx, theta, adr, met["cost_pct"]))
+        if math.isfinite(theta):
+            legs[k] = LastLeg(run.pivot_ts, int(m1.ts[-1]), run.pivot, c)
+            met[f"last_leg_pct_{sfx}"] = (c - run.pivot) / run.pivot * 100
+            met[f"last_leg_adr_{sfx}"] = (c - run.pivot) / adr
+        else:
+            met[f"last_leg_pct_{sfx}"] = met[f"last_leg_adr_{sfx}"] = math.nan
     met["ambiguous_minutes"] = float(ambiguous)
+    score_sw = swings.get(p.score_k, [])
+    met["swing_density"] = (
+        _ratio(sum(s.amplitude for s in score_sw), rng) if math.isfinite(adr) else math.nan
+    )
 
-    buckets = _buckets(inp, p, pb, swings.get(p.score_k, []))
-    return DayResult(met, swings, buckets)
+    buckets = _buckets(inp, p, pb, score_sw)
+    return DayResult(met, swings, legs, buckets)
 
 
-def _swing_stats(sw: list[Swing], sfx: str, theta: float, atr: float, cost: float) -> dict:
+def _swing_stats(sw: list[Swing], sfx: str, theta: float, adr: float, cost: float) -> dict:
     if not math.isfinite(theta):
-        keys = ("n", "avg_atr", "avg_pct", "max_atr", "avg_minutes", "total_pct", "capturable_pct")
+        keys = ("n", "avg_adr", "avg_pct", "max_adr", "avg_minutes", "total_pct", "capturable_pct")
         return {f"swing_{k}_{sfx}": math.nan for k in keys}
     amp = np.array([s.amplitude for s in sw])
     pct = np.array([s.amplitude_pct for s in sw])
@@ -217,9 +246,9 @@ def _swing_stats(sw: list[Swing], sfx: str, theta: float, atr: float, cost: floa
     n = len(sw)
     return {
         f"swing_n_{sfx}": float(n),
-        f"swing_avg_atr_{sfx}": float(amp.mean() / atr) if n else math.nan,
+        f"swing_avg_adr_{sfx}": float(amp.mean() / adr) if n else math.nan,
         f"swing_avg_pct_{sfx}": float(pct.mean()) if n else math.nan,
-        f"swing_max_atr_{sfx}": float(amp.max() / atr) if n else math.nan,
+        f"swing_max_adr_{sfx}": float(amp.max() / adr) if n else math.nan,
         f"swing_avg_minutes_{sfx}": float(mins.mean()) if n else math.nan,
         f"swing_total_pct_{sfx}": float(pct.sum()),
         # 转折点要回撤 θ 才能确认：入场、出场各损失约 θ，再扣买卖两次成本

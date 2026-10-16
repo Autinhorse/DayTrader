@@ -4,6 +4,8 @@
 结果相同就没有歧义；不同时读这一分钟的 1 秒 bar 按实际顺序处理。1 秒 bar 本身也分不出先后时
 （或没有 1 秒数据）按保守规则：取确认摆动较少的顺序，一样多时按开盘价离最高价还是最低价近来定，
 并计入 ambiguous_minutes。
+
+收盘时还没确认的最后一段（最后一个转折点 → 收盘价）不算摆动，单独返回（规范 v3 的 last_leg）。
 """
 
 from __future__ import annotations
@@ -39,6 +41,14 @@ class Swing:
     @property
     def minutes(self) -> float:
         return (self.end_ts - self.start_ts) / 60e9
+
+
+@dataclass(frozen=True, slots=True)
+class SwingRun:
+    swings: list[Swing]  # 已确认的摆动
+    ambiguous: int  # 有歧义且无法用 1 秒数据解决的分钟数
+    pivot: float  # 最后一个转折点（还没有转折点时是开盘价）
+    pivot_ts: int
 
 
 @dataclass(slots=True)
@@ -129,13 +139,12 @@ def find_swings(
     bar_ns: int = 60 * 10**9,
     fine: FineBars | None = None,
     fine_ns: int = 10**9,
-) -> tuple[list[Swing], int]:
-    """一天的摆动。theta 为价格单位的阈值。返回 (确认的摆动, 有歧义且无法用 1 秒数据解决的分钟数)。
-
-    从第一根 bar 的开盘价开始；收盘时尚未确认的最后一段不计入。
-    """
+) -> SwingRun:
+    """一天的摆动。theta 为价格单位的阈值。从第一根 bar 的开盘价开始；收盘时尚未确认的最后一段
+    不计入 swings，它的起点是返回的 pivot。"""
     if len(ts) == 0 or not np.isfinite(theta) or theta <= 0:
-        return [], 0
+        p0 = float(open_[0]) if len(ts) else float("nan")
+        return SwingRun([], 0, p0, int(ts[0]) if len(ts) else 0)
     p0 = float(open_[0])
     st = _State(theta, 0, p0, int(ts[0]), p0, int(ts[0]))
     swings: list[Swing] = []
@@ -161,4 +170,6 @@ def find_swings(
                 ambiguous += 1
         st = nxt
         swings += new
-    return swings, ambiguous
+    if st.direction == 0:
+        return SwingRun(swings, ambiguous, p0, int(ts[0]))
+    return SwingRun(swings, ambiguous, st.piv, st.piv_ts)

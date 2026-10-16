@@ -16,10 +16,11 @@ import pandas as pd
 from matplotlib.figure import Figure
 
 from trader.analytics.daily_metrics import cumulative_vwap
-from trader.analytics.frames import included, rows
+from trader.analytics.frames import corr, included, rows
 from trader.analytics.loader import to_bars
 from trader.analytics.params import ksuffix
 from trader.analytics.pipeline import NY, VolReport
+from trader.data.corporate_actions import load_actions, split_factor
 
 plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
 plt.rcParams["axes.unicode_minus"] = False
@@ -51,11 +52,27 @@ def param_summary(rep: VolReport) -> pd.DataFrame:
         ("本地无数据的证券", "、".join(rep.missing_symbols) or "无"),
         ("未参与汇总的日子", len(rep.excluded)),
         ("疑似停牌（只标记，不剔除）", int(d["possible_halt"].to_numpy().sum())),
+        (
+            "异常日（" + ("已剔除" if p.exclude_anomaly_days else "只标记，不剔除") + "）",
+            int(d["anomaly_flag"].to_numpy().sum()),
+        ),
         ("1 秒数据也分不出先后的分钟", int(d["ambiguous_minutes"].to_numpy().sum())),
-        ("摆动阈值（ATR 倍数）", ", ".join(f"{k:g}" for k in p.swing_thresholds_atr)),
-        ("打分用阈值", f"{p.score_k:g} × ATR"),
-        ("ATR", f"{p.atr_days} 日 Wilder，用前一交易日的值"),
+        (
+            "区间内拆股",
+            "、".join(
+                f"{sym} {pd.Timestamp(ex).date()}（{ratio:g} 比 1）"
+                for sym, ex, ratio in zip(
+                    rep.splits["symbol"], rep.splits["ex_date"], rep.splits["ratio"], strict=True
+                )
+            )
+            or "无",
+        ),
+        ("价格口径", f"拆股复权到 {rep.end}（成本分档按当天实际价格）"),
+        ("摆动阈值（ADR 倍数）", ", ".join(f"{k:g}" for k in p.swing_thresholds_adr)),
+        ("打分用阈值", f"{p.score_k:g} × ADR"),
+        ("ADR", f"{p.adr_days} 日常规时段振幅的简单平均（不含提前收盘日），用前一交易日的值"),
         ("单边成本假设", tiers),
+        ("扩展时段参考", "计算（不参与打分）" if p.include_extended_hours else "不计算"),
     ]
     return pd.DataFrame(rows, columns=["项目", "值"]).set_index("项目")
 
@@ -76,7 +93,7 @@ def styled_ranking(rep: VolReport):  # noqa: ANN201
             continue
         if c == "dollar_vol":
             fmt[c] = "{:,.0f}"
-        elif c in ("days",) or c.startswith("swing_n_") or c == "vwap_crosses":
+        elif c == "days" or (c.startswith("swing_n_") and "_vs_" not in c) or c == "vwap_crosses":
             fmt[c] = "{:.1f}"
         elif pd.api.types.is_numeric_dtype(r[c]):
             fmt[c] = "{:.2f}"
@@ -234,14 +251,17 @@ def typical_day(rep: VolReport, symbol: str) -> date | None:
     return d.loc[dist.idxmin(), "date"]
 
 
-def fig_detail_day(rep: VolReport, symbol: str, day: date | None = None) -> Figure:
-    """一天的 1 分钟收盘价，叠加 VWAP 和识别出的摆动转折点，用于人工检查摆动算法。"""
-    day = day or typical_day(rep, symbol)
-    fig, ax = plt.subplots(figsize=(12, 5))
-    if day is None or rep.history is None:
-        return fig
+def _day_bars(rep: VolReport, symbol: str, day: date):  # noqa: ANN202
+    """一天的 1 分钟 bar，复权口径与报表相同。"""
+    assert rep.history is not None
     td = rep.history.cal.trading_day(day)
-    b = to_bars(rep.history.day_bars(symbol, "1m", td, "rth"))
+    f = split_factor(load_actions(rep.history.data_dir), symbol, day, rep.end)
+    return to_bars(rep.history.day_bars(symbol, "1m", td, "rth"), f)
+
+
+def plot_day(ax: Any, rep: VolReport, symbol: str, day: date, compact: bool = False) -> None:
+    """在 ax 上画一天的 1 分钟价格、VWAP、已确认的摆动（实线）和未确认的最后一段（虚线）。"""
+    b = _day_bars(rep, symbol, day)
     t = pd.to_datetime(b.ts, unit="ns", utc=True).tz_convert(NY)
     ax.fill_between(t, b.low, b.high, color="#9ec3ea", alpha=0.5, lw=0, label="1 分钟高低")
     ax.plot(t, b.close, color=MAIN_COLOR, lw=0.8, label="收盘价")
@@ -251,23 +271,108 @@ def fig_detail_day(rep: VolReport, symbol: str, day: date | None = None) -> Figu
     sel = (
         rows(sw, (sw["symbol"] == symbol) & (sw["date"] == day) & (sw["k"] == k)) if len(sw) else sw
     )
-    if len(sel):
-        xs = [sel["start"].iloc[0], *sel["end"]]
-        ys = [sel["start_price"].iloc[0], *sel["end_price"]]
-        ax.plot(xs, ys, color="#d62728", lw=1.5, marker="o", ms=5, label=f"摆动（{k:g} × ATR）")
+    done = rows(sel, sel["confirmed"]) if len(sel) else sel
+    leg = rows(sel, ~sel["confirmed"]) if len(sel) else sel
+    if len(done):
+        xs = [done["start"].iloc[0], *done["end"]]
+        ys = [done["start_price"].iloc[0], *done["end_price"]]
+        ax.plot(xs, ys, color="#d62728", lw=1.5, marker="o", ms=3 if compact else 5,
+                label=f"摆动（{k:g} × ADR）")  # fmt: skip
+    if len(leg):
+        r0 = leg.iloc[0]
+        ax.plot([r0["start"], r0["end"]], [r0["start_price"], r0["end_price"]], color="#d62728",
+                lw=1.5, ls="--", label="未确认的最后一段")  # fmt: skip
     row = rows(rep.daily, (rep.daily["symbol"] == symbol) & (rep.daily["date"] == day)).iloc[0]
-    atr = row["atr"]
-    ax.set_title(
-        f"{symbol} {day}  ATR {atr:.2f}，阈值 θ = {k * atr:.2f}，摆动 {len(sel)} 次，"
-        f"振幅 {row['range_pct']:.2f}%，body_ratio {row['body_ratio']:.2f}"
-        if math.isfinite(atr)
-        else f"{symbol} {day}"
-    )
+    adr = row["adr"]
+    if compact:
+        title = f"{symbol} {day}：{row['anomaly_reason'] or ''}"
+    elif math.isfinite(adr):
+        title = (
+            f"{symbol} {day}  ADR {adr:.2f}，阈值 θ = {k * adr:.2f}，摆动 {len(done)} 次，"
+            f"振幅 {row['range_pct']:.2f}%，body_ratio {row['body_ratio']:.2f}，"
+            f"最后一段 {row[f'last_leg_adr_{_k(rep)}']:+.2f} ADR"
+        )
+    else:
+        title = f"{symbol} {day}"
+    ax.set_title(title, fontsize=9 if compact else 11)
     ax.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter("%H:%M", tz=NY))  # type: ignore[attr-defined]
-    ax.legend(loc="best", fontsize=8)
+    if not compact:
+        ax.legend(loc="best", fontsize=8)
     ax.grid(alpha=0.3)
+
+
+def fig_detail_day(rep: VolReport, symbol: str, day: date | None = None) -> Figure:
+    """一天的 1 分钟收盘价，叠加 VWAP 和识别出的摆动转折点，用于人工检查摆动算法。"""
+    day = day or typical_day(rep, symbol)
+    fig, ax = plt.subplots(figsize=(12, 5))
+    if day is None or rep.history is None:
+        return fig
+    plot_day(ax, rep, symbol, day)
     fig.tight_layout()
     return fig
+
+
+def figs_anomaly_days(rep: VolReport, per_fig: int = 8) -> list[Figure]:
+    """每个异常日一张小图（每张大图 per_fig 个），供人工核对是不是数据问题。"""
+    a = rep.anomalies
+    out = []
+    if rep.history is None:
+        return out
+    for i in range(0, len(a), per_fig):
+        part = a.iloc[i : i + per_fig]
+        n = len(part)
+        nrows = (n + 1) // 2
+        fig, axes = plt.subplots(nrows, 2, figsize=(14, 3.2 * nrows), squeeze=False)
+        for ax, (_, r) in zip(axes.flat, part.iterrows(), strict=False):
+            plot_day(ax, rep, str(r["symbol"]), r["date"], compact=True)
+        for ax in list(axes.flat)[n:]:
+            ax.axis("off")
+        fig.tight_layout()
+        out.append(fig)
+    return out
+
+
+def styled_sensitivity(rep: VolReport):  # noqa: ANN201
+    """摆动阈值敏感性表：名次随阈值变化越小，排名越不依赖阈值的选择。"""
+    t = rep.sensitivity
+    styler: Any = t.style
+    fmt = {c: ("{:.0f}" if c[1] in ("rank", "score_total") else "{:.2f}") for c in t.columns}
+    ranks = [c for c in t.columns if c[1] == "rank"]
+    return styler.format(fmt, na_rep="—").background_gradient(cmap="YlGn_r", subset=ranks)
+
+
+LEVERAGE_NOTE = (
+    "杠杆 ETF 的震荡形态与标的基本相同，二者应视为同一机会，根据资金规模和实际价差二选一。"
+    "range_ratio 是每天振幅之比的中位数，可以和名义杠杆倍数对比；"
+    "corr_5m 是两者 5 分钟收益率的相关系数。"
+)
+
+ETH_NOTE = (
+    "**仅供参考，不参与打分。** 跳空拆成三段：前一日盘后（gap_post）、无交易时段（gap_overnight）、"
+    "当日盘前（gap_pre），单位是 ADR；三段之和等于 gap_adr。*_share 是各段绝对值占三段合计的比例。"
+)
+
+
+def fig_eth_scatter(rep: VolReport) -> tuple[Figure, float, float]:
+    """当日盘前振幅 pm_range_adr 与常规时段振幅 range_adr 的散点图（全部证券、全部交易日）。
+    返回 (图, Pearson 相关, Spearman 相关)。"""
+    d = included(rep.daily)
+    fig, ax = plt.subplots(figsize=(7, 6))
+    if "pm_range_adr" not in d.columns:
+        return fig, math.nan, math.nan
+    x = d[["pm_range_adr", "range_adr"]].replace([np.inf, -np.inf], np.nan).dropna()
+    if len(x) < 3:
+        return fig, math.nan, math.nan
+    pear = corr(x["pm_range_adr"], x["range_adr"])
+    spear = corr(x["pm_range_adr"], x["range_adr"], rank=True)
+    colors = [BENCH_COLOR if s in rep.benchmarks else MAIN_COLOR for s in d.loc[x.index, "symbol"]]
+    ax.scatter(x["pm_range_adr"], x["range_adr"], s=8, alpha=0.4, c=colors)
+    ax.set_xlabel("盘前振幅 pm_range_adr")
+    ax.set_ylabel("常规时段振幅 range_adr")
+    ax.set_title(f"盘前活跃度与当天振幅（Pearson {pear:.2f}，Spearman {spear:.2f}）")
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    return fig, pear, spear
 
 
 # 指标和分数的说明（Markdown），notebook 第 9 部分显示

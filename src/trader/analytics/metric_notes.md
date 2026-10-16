@@ -1,22 +1,33 @@
+**打分只用常规时段（9:30–16:00）的数据。** 价格按拆股复权到区间末日；摆动类字段的后缀是阈值：`_k015` = 0.15 × ADR。
+
 | 指标 | 含义 |
 |---|---|
-| `range_pct` / `range_atr` | 常规时段振幅，占开盘价的百分比 / 相对前一日 ATR 的倍数 |
+| ADR | 过去 21 个交易日常规时段振幅（最高 − 最低，不含提前收盘日）的简单平均，用前一交易日的值。不受隔夜跳空影响 |
+| `range_pct` / `range_adr` | 常规时段振幅，占开盘价的百分比 / 相对 ADR 的倍数（约 1 表示普通的一天） |
+| `adr_pct` | ADR 占开盘价的百分比 |
+| `gap_adr` | 跳空（开盘 − 前收盘）/ ADR，只作参考 |
 | `rv_5min_pct` | 5 分钟收益率算的日内已实现波动率（不年化） |
 | `body_ratio` | \|收盘 − 开盘\| / 振幅：接近 1 为单边，接近 0 为震荡 |
-| `swing_n_k025` | 以 0.25 × ATR 为阈值识别的完整摆动次数（ZigZag，收盘前未确认的一段不算） |
-| `swing_avg_pct_k025` | 平均每次摆动的幅度（%） |
-| `swing_capturable_pct_k025` | Σ max(摆动幅度 − 2θ − 2 × 成本, 0)：按"回撤 θ 才确认"的方式交易，估计每天能拿到的波动 |
+| `swing_n` | 识别出的完整摆动次数（ZigZag，价格从极值回撤 θ 才确认一次） |
+| `swing_avg_pct` | 平均每次摆动的幅度（%） |
+| `swing_capturable_pct` | Σ max(摆动幅度 − 2θ − 2 × 成本, 0)：按"回撤 θ 才确认"的方式交易，估计每天能拿到的波动 |
+| `capturable_days_ratio` | `swing_capturable_pct` > 0 的天数占比：可获取的波动是不是大多数日子都有 |
 | `swing_total_pct` | 所有摆动幅度之和，事后理论上限，只作参考 |
+| `last_leg_pct` / `last_leg_adr` | 收盘时还没确认的最后一段（最后一个转折点 → 收盘价），带正负号；不计入摆动。趋势日这一段往往很长 |
 | `vwap_crosses` | 收盘价穿越当日 VWAP 并保持至少 3 分钟的次数 |
 | `efficiency` / `efficiency_1m` | 效率比（5 分钟 / 1 分钟收盘价）：1 为单边，接近 0 为来回打转 |
 | `vr_3`、`ac1` | 方差比、一阶自相关（5 分钟）：小于 1 / 负值偏均值回归 |
 | `missing_ratio` | 无成交分钟占比；高的证券流动性差，各项指标可信度低 |
-| `*_vs_spy` | 该证券中位数 / SPY 中位数；SPY 为 0 时为空 |
+| `*_vs_spy` | 相对 SPY：`body_ratio`、`range_adr`、`swing_n` 用中位数之比，`swing_capturable_pct` 用均值之比，`capturable_days_ratio` 直接相除；SPY 为 0 时为空 |
+
+**异常日**：满足任一条件就标记（默认不剔除，`exclude_anomaly_days=True` 才剔除）：摆动密度（Σ 摆动幅度 / 当日振幅）> 12；摆动次数超过该证券中位数的 4 倍且至少 10 次；开盘 5 分钟以后有 1 分钟 bar 的最高或最低价偏离前后各 5 分钟收盘价中位数超过 0.5 × ADR。通常是错误成交（离群价格），也可能是财报日、重大消息。
+
+**扩展时段**（只作参考，不参与打分）：`gap_post_adr` 前一日盘后的变动，`gap_overnight_adr` 无交易时段的变动，`gap_pre_adr` 当日盘前的变动，三段之和 = `gap_adr`；`pm_range_adr` 盘前振幅；`eth_vol_share` 盘前 + 盘后成交量占全天比例。成交量低于 100 股的 1 分钟 bar 不参与取价。
 
 **分数**（0–100）是在本次输入的证券（含参照证券）中的百分位排名，换一组证券就会变；跨批次比较请看原始指标和 `*_vs_spy`。
 
-- 活跃度：`range_pct`、`rv_5min_pct`
-- 震荡度：`swing_n`（0.5）、1 − `body_ratio`（0.25）、`vwap_crosses`（0.25）
-- 摆动价值：`swing_capturable_pct`（0.6）、`swing_avg_pct`（0.4）
+- 活跃度：`range_pct` 中位数（0.5）、`rv_5min_pct` 中位数（0.5）
+- 震荡度：`swing_n` 均值（0.5）、1 − `body_ratio` 中位数（0.25）、`vwap_crosses` 中位数（0.25）
+- 摆动价值：`swing_capturable_pct` 均值（0.4）、`capturable_days_ratio`（0.3）、`swing_avg_pct` 中位数（0.3）
 - 稳定性：每天的震荡分（`swing_n` 和 1 − `body_ratio` 在全部证券、全部交易日中的百分位平均）≥ 50 的天数占比
 - 综合 = 活跃度 0.30 + 震荡度 0.30 + 摆动价值 0.25 + 稳定性 0.15

@@ -1,10 +1,21 @@
-# 日内波动与震荡强度分析报表（Jupyter Notebook）设计规范 v3.2
+# 日内波动与震荡强度分析报表（Jupyter Notebook）设计规范 v3.3
 
 实现：`src/trader/analytics/`，notebook `user/notebooks/日内波动报表.ipynb`。实现约定见决策记录
 `docs/decisions/0009-intraday-volatility-report.md`（v1/v2）、`0010-intraday-report-v3.md`（v3）
-、`0011-report-data-cleaning.md`（v3.1）和 `0012-report-opening-segment.md`（v3.2）。
+、`0011-report-data-cleaning.md`（v3.1）、`0012-report-opening-segment.md`（v3.2）
+和 `0013-report-tradable-score.md`（v3.3）。
 
 ## 修订说明
+
+### v3.3（相对 v3.2，2026-10-16）
+
+1. **主排序改为可交易性评分** `score_tradable`：可获取波动均值（绝对值）0.4、转化效率 0.3、每日转化效率中位数 0.3，各项先做百分位排名。
+   原因：综合得分里摆动次数、VWAP 穿越次数等计数类指标和"能赚多少"没有直接关系，却把 GLD、AMZN 这类可获取波动很小的证券推高。
+   综合得分和四个分项保留作参考；阈值敏感性、开盘剔除对照、多区间对比都按可交易性评分排名
+2. **稳定性改为每日转化效率的中位数** `daily_conversion_median`（当天 `swing_capturable_pct` / `adr_pct` 的中位数）。
+   v3.2 的"当日震荡分 ≥ 50 的天数占比"挤在 0.30–0.59，7–9 月有 5 只证券并列 0.516
+3. **合并区间** `merge_periods`：几个日期区间合成一个样本计算（例如两个不相连的季度）。数据从最早到最晚连续读取，ADR 等跨日的量不受区间之间空档的影响，最后只保留区间内的日子
+4. notebook 默认分析 2026-04-01 ~ 2026-09-30（两个季度合成一个样本，约 128 个交易日），单季排名噪音较大
 
 ### v3.2（相对 v3.1，2026-10-16）
 
@@ -127,7 +138,9 @@ AAPL、MSFT、AMZN 为 43–44%），而开盘时价差大、价格变化快，�
 | `leveraged_pairs` | `{}` | 杠杆 ETF 与标的的对应，如 `{"METU": ("META", 2), "TSLL": ("TSLA", 2), "NVDL": ("NVDA", 2)}`，值为（标的，杠杆倍数）。notebook 里默认填了这三对 |
 | `include_extended_hours` | `True` | 是否计算第 7 节的扩展时段参考指标 |
 | `eth_min_bar_volume` | 100 | 扩展时段 1 分钟 bar 成交量（股）低于此值时，不参与取价（第一笔、最后一笔、最高、最低） |
-| `compare_periods` | `None`（notebook 里默认填 2026-04-01 ~ 2026-06-30） | 可选：另一个日期区间，用于第 6 节的多区间对比 |
+| `compare_periods` | `None` | 可选：另一个日期区间，用于第 6 节的多区间对比 |
+| `merge_periods` | `None` | 可选：几个日期区间合成一个样本（v3.3）；设了它，`start_date`、`end_date` 不再使用 |
+| `tradable_weights` | 0.4 / 0.3 / 0.3 | 可交易性评分的权重（v3.3） |
 
 ### 2.2 数据处理规则
 
@@ -268,7 +281,11 @@ ATR 不再用于任何打分或归一化。如需展示跳空，用 ADR 倍数�
 
 摆动类指标均使用 `score_k` 对应的阈值，只统计开盘 `swing_skip_open_min` 分钟以后开始的摆动。
 
-**稳定性（v3.2）**：对每一天，用当天的"`swing_capturable_pct` / `adr_pct`"和 1 − `body_ratio` 在所有证券、所有交易日中算百分位，取平均得到"当日震荡分"。稳定性 = 当日震荡分 ≥ 50 的天数占比，再在证券之间做百分位排名。v3.1 及以前用摆动次数，小整数并列多，分数跳动大。
+**稳定性（v3.3）**：每日转化效率（当天 `swing_capturable_pct` / `adr_pct`）的中位数，再在证券之间做百分位排名。v3.1 及以前用摆动次数，v3.2 用"当日震荡分 ≥ 50 的天数占比"，都并列多、分数跳动大。
+
+### 5.5 可交易性评分（v3.3，主排序）
+
+`score_tradable` = `swing_capturable_pct` 均值（绝对值）× 0.4 + `conversion` × 0.3 + `daily_conversion_median` × 0.3，各项先在本次证券中做百分位排名。排名总表按它排序，详情默认取它的前几名；5.3 的综合得分保留作参考。
 
 ### 5.3 综合得分
 

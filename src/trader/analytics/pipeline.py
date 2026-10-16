@@ -154,8 +154,18 @@ def build_report(
             f"score_k={p.score_k} 必须在 swing_thresholds_adr {p.swing_thresholds_adr} 里"
         )
     s, e = _d(start), _d(end)
-    if e < s:
+    periods: list[tuple[date, date]] = [(s, e)]
+    if p.merge_periods:
+        # 合并区间：连续读取最早到最晚的数据（ADR 等跨日的量不受区间之间的空档影响），
+        # 最后只保留落在各区间里的日子
+        periods = [(_d(a), _d(b)) for a, b in p.merge_periods]
+        s, e = min(a for a, _ in periods), max(b for _, b in periods)
+    if any(b < a for a, b in periods):
         raise ValueError("end_date 早于 start_date")
+
+    def in_periods(day: date) -> bool:
+        return any(a <= day <= b for a, b in periods)
+
     if isinstance(tickers, str):
         tickers = tickers.replace(",", " ").split()
     user = list(dict.fromkeys(t.strip().upper() for t in tickers if t.strip()))
@@ -224,6 +234,10 @@ def build_report(
             for r in swing_rows[n_before:]:
                 r["start_min"] = (r["start"] - inp.day_open) / 60e9  # 距开盘分钟数
 
+    day_rows = [r for r in day_rows if in_periods(r["date"])]
+    swing_rows = [r for r in swing_rows if in_periods(r["date"])]
+    bucket_rows = [r for r in bucket_rows if in_periods(r["date"])]
+    excluded = [r for r in excluded if in_periods(r["date"])]
     daily = pd.DataFrame(day_rows)
     if daily.empty:
         raise ValueError("所选证券在这段时间里没有可用数据（缺数据的证券请先在数据管理里下载）")
@@ -261,6 +275,7 @@ def build_report(
             f"swing_capturable_pct_{sfx}": med[f"swing_capturable_pct_{sfx}"],
             f"swing_capturable_pct_{sfx}_mean": mean[f"swing_capturable_pct_{sfx}"],
             "conversion": aggregate.conversion(med, mean, p.score_k),
+            "daily_conversion_median": scores["consistency_raw"],
             "capturable_days_ratio": days_ratio[p.score_k].reindex(med.index),
             "open_swing_n_mean": mean["open_swing_n"],
             "open_capturable_pct_mean": mean["open_capturable_pct"],
@@ -270,10 +285,11 @@ def build_report(
         }
     )
     ranking = scores.join(key).join(ratios)
-    ranking.insert(5, "low_liquidity", ranking["dollar_vol"] < p.min_dollar_vol)
-    ranking.insert(6, "benchmark", [sym in bench and sym not in user for sym in ranking.index])
-    ranking.insert(7, "days", daily[daily["included"]].groupby("symbol").size())
-    ranking = ranking.sort_values("score_total", ascending=False)
+    ranking = ranking.drop(columns="consistency_raw")
+    ranking.insert(6, "low_liquidity", ranking["dollar_vol"] < p.min_dollar_vol)
+    ranking.insert(7, "benchmark", [sym in bench and sym not in user for sym in ranking.index])
+    ranking.insert(8, "days", daily[daily["included"]].groupby("symbol").size())
+    ranking = ranking.sort_values("score_tradable", ascending=False)
     ranking.index.name = "symbol"
     sens = scoring.sensitivity(med, mean, daily, p, days_ratio).reindex(ranking.index)
     open_skip = scoring.open_skip_table(med, mean, daily, p).reindex(ranking.index)
@@ -290,11 +306,15 @@ def build_report(
     if missing:
         notes.append("本地没有数据、未参与计算：" + "、".join(missing) + "（请先在数据管理里下载）")
     notes += ratio_notes + lev_notes
+    if p.merge_periods:
+        notes.append(
+            "合并区间：" + "、".join(f"{a}~{b}" for a, b in periods) + "，合成一个样本计算"
+        )
 
     compare, rho = None, math.nan
     if p.compare_periods is not None:
         cs, ce = p.compare_periods
-        other = build_report(user, cs, ce, replace(p, compare_periods=None), h)
+        other = build_report(user, cs, ce, replace(p, compare_periods=None, merge_periods=None), h)
         compare, rho = _compare(ranking, other.ranking, f"{s}~{e}", f"{_d(cs)}~{_d(ce)}")
     eth_sum = (
         extended_hours.summarize(daily).reindex(ranking.index)
@@ -353,13 +373,13 @@ def _swing_row(
 
 
 def _compare(a: pd.DataFrame, b: pd.DataFrame, la: str, lb: str) -> tuple[pd.DataFrame, float]:
-    """两个区间的综合得分和名次；Spearman 相关 = 两边都有的证券的得分名次的相关系数。"""
+    """两个区间的可交易性评分和名次；Spearman 相关 = 两边都有的证券的得分名次的相关系数。"""
     t = pd.DataFrame(
         {
-            f"score_{la}": a["score_total"],
-            f"rank_{la}": a["score_total"].rank(ascending=False, method="min"),
-            f"score_{lb}": b["score_total"],
-            f"rank_{lb}": b["score_total"].rank(ascending=False, method="min"),
+            f"score_{la}": a["score_tradable"],
+            f"rank_{la}": a["score_tradable"].rank(ascending=False, method="min"),
+            f"score_{lb}": b["score_tradable"],
+            f"rank_{lb}": b["score_tradable"].rank(ascending=False, method="min"),
         }
     )
     t["rank_change"] = t[f"rank_{lb}"] - t[f"rank_{la}"]

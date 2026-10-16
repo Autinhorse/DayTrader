@@ -369,7 +369,10 @@ def styled_sensitivity(rep: VolReport):  # noqa: ANN201
     """摆动阈值敏感性表：名次随阈值变化越小，排名越不依赖阈值的选择。"""
     t = rep.sensitivity
     styler: Any = t.style
-    fmt = {c: ("{:.0f}" if c[1] in ("rank", "score_total") else "{:.2f}") for c in t.columns}
+    fmt = {
+        c: ("{:.0f}" if c[1] in ("rank", "score_total", "score_tradable") else "{:.2f}")
+        for c in t.columns
+    }
     ranks = [c for c in t.columns if c[1] == "rank"]
     return styler.format(fmt, na_rep="—").background_gradient(cmap="YlGn_r", subset=ranks)
 
@@ -378,7 +381,10 @@ def styled_open_skip(rep: VolReport):  # noqa: ANN201
     """开盘剔除对照表：名次越绿越靠前。"""
     t = rep.open_skip
     styler: Any = t.style
-    fmt = {c: ("{:.0f}" if c[1] in ("rank", "score_total") else "{:.2f}") for c in t.columns}
+    fmt = {
+        c: ("{:.0f}" if c[1] in ("rank", "score_total", "score_tradable") else "{:.2f}")
+        for c in t.columns
+    }
     ranks = [c for c in t.columns if c[1] == "rank"]
     return styler.format(fmt, na_rep="—").background_gradient(cmap="YlGn_r", subset=ranks)
 

@@ -16,6 +16,7 @@
 | `swing_avg_pct` | 平均每次摆动的幅度（%） |
 | `swing_capturable_pct` | Σ max(摆动幅度 − 2θ − 2 × 成本, 0)：按"回撤 θ 才确认"的方式交易的波动。没有计入反应延迟和滑点，**是比较用的相对指数，不是能实际赚到的收益**；阈值越小高估越多 |
 | `conversion` | 转化效率 = `swing_capturable_pct` 均值 / `adr_pct` 中位数：日内波动有多少能变成可交易的摆动 |
+| `daily_conversion_median` | 每日转化效率（当天 `swing_capturable_pct` / `adr_pct`）的中位数："普通的一天"表现如何，不受少数大行情日影响 |
 | `capturable_days_ratio` | `swing_capturable_pct` > 0 的天数占比：可获取的波动是不是大多数日子都有 |
 | `swing_total_pct` | 所有摆动幅度之和，事后理论上限，只作参考 |
 | `last_leg_pct` / `last_leg_adr` | 收盘时还没确认的最后一段（最后一个转折点 → 收盘价），带正负号；不计入摆动。趋势日这一段往往很长 |
@@ -33,8 +34,12 @@
 
 **分数**（0–100）是在本次输入的证券（含参照证券）中的百分位排名，换一组证券就会变；跨批次比较请看原始指标和 `*_vs_spy`。
 
+**可交易性评分** `score_tradable`（主排序）= 可获取波动均值（绝对值）0.4 + 转化效率 0.3 + 每日转化效率中位数 0.3，各项先做百分位排名。
+
+**综合得分** `score_total`（参考）：
+
 - 活跃度：`range_pct` 中位数（0.5）、`rv_5min_pct` 中位数（0.5）
 - 震荡度：`swing_n` 均值（0.5）、1 − `body_ratio` 中位数（0.25）、`vwap_crosses` 中位数（0.25）
 - 摆动价值：`swing_capturable_pct` 均值（0.4）、`capturable_days_ratio`（0.3）、`swing_avg_pct` 中位数（0.3）
-- 稳定性：每天的震荡分（"可获取波动 / ADR%" 和 1 − `body_ratio` 在全部证券、全部交易日中的百分位平均）≥ 50 的天数占比
+- 稳定性：每日转化效率的中位数
 - 综合 = 活跃度 0.30 + 震荡度 0.30 + 摆动价值 0.25 + 稳定性 0.15

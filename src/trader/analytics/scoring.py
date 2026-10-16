@@ -35,13 +35,11 @@ def weighted(parts: Mapping[str, Any], weights: dict[str, float]) -> pd.Series:
 
 
 def consistency(daily: pd.DataFrame, k: float | str) -> pd.Series:
-    """当日震荡分 = 当天"可获取波动 / ADR%"和 1 − body_ratio 在所有证券、所有交易日中的百分位
-    的平均（都是连续值，比摆动次数这种小整数少并列）；稳定性原值 = 当日震荡分 ≥ 50 的天数占比。"""
+    """每日转化效率的中位数：每天"swing_capturable_pct / adr_pct"，再取中位数。
+    反映"普通的一天"能把多少波动变成可交易的摆动，不受少数大行情日影响；连续值，几乎没有并列。"""
     d = included(daily)
     cap = d[f"swing_capturable_pct_{ksuffix(k)}"] / d["adr_pct"]
-    day_score = (pct_rank(cap) + pct_rank(1 - d["body_ratio"])) / 2
-    hit = (day_score >= 50).astype(float).where(day_score.notna())
-    return hit.groupby(d["symbol"]).mean()
+    return cap.groupby(d["symbol"]).median()
 
 
 def score(
@@ -70,8 +68,14 @@ def score(
     swing_value = weighted(sv_parts, p.swing_value_weights)
     cons_raw = consistency(daily, k).reindex(med.index)
     cons = pct_rank(cons_raw)
+    tr_parts = {
+        "capturable_mean": mean[f"swing_capturable_pct_{s}"],
+        "conversion": conversion(med, mean, s),
+        "daily_conversion_median": cons_raw,
+    }
     out = pd.DataFrame(
         {
+            "score_tradable": weighted(tr_parts, p.tradable_weights),
             "score_activity": activity,
             "score_rotation": rotation,
             "score_swing_value": swing_value,
@@ -83,7 +87,7 @@ def score(
     w = p.score_weights
     total = sum(w.values())
     out.insert(
-        0,
+        1,
         "score_total",
         (
             out["score_activity"] * w["activity"]
@@ -104,7 +108,7 @@ def sensitivity(
     days_ratio: Mapping[float, pd.Series],
 ) -> pd.DataFrame:
     """每个摆动阈值下的 swing_n 均值、swing_capturable_pct 均值、capturable_days_ratio、
-    综合得分和名次（规范第 6 节第 4 项）。列为 (阈值, 字段) 两级。"""
+    可交易性评分和名次（规范第 6 节第 4 项），综合得分作参考。列为 (阈值, 字段) 两级。"""
     parts = {}
     for k in p.swing_thresholds_adr:
         s = ksuffix(k)
@@ -114,8 +118,9 @@ def sensitivity(
                 "swing_n_mean": mean[f"swing_n_{s}"],
                 "capturable_mean": mean[f"swing_capturable_pct_{s}"],
                 "capturable_days_ratio": days_ratio[k].reindex(med.index),
+                "score_tradable": sc["score_tradable"],
+                "rank": sc["score_tradable"].rank(ascending=False, method="min"),
                 "score_total": sc["score_total"],
-                "rank": sc["score_total"].rank(ascending=False, method="min"),
             }
         )
     return pd.concat(parts, axis=1, names=["k", "field"])
@@ -125,7 +130,7 @@ def open_skip_table(
     med: pd.DataFrame, mean: pd.DataFrame, daily: pd.DataFrame, p: ReportParams
 ) -> pd.DataFrame:
     """开盘剔除对照：分别只统计开始于开盘 m 分钟以后的摆动（m 取 open_skip_compare），
-    各算一次综合得分和名次，并列出转化效率、可获取波动均值（绝对值）、摆动次数均值。
+    各算一次可交易性评分和名次，并列出转化效率、可获取波动均值（绝对值）、摆动次数均值。
     振幅、ADR、body_ratio 等不变。列为 (剔除分钟数, 字段) 两级。"""
     parts = {}
     for m in p.open_skip_compare:
@@ -134,8 +139,9 @@ def open_skip_table(
         sc = score(med, mean, dr, daily, p, ss)
         parts[f"{m}"] = pd.DataFrame(
             {
+                "score_tradable": sc["score_tradable"],
+                "rank": sc["score_tradable"].rank(ascending=False, method="min"),
                 "score_total": sc["score_total"],
-                "rank": sc["score_total"].rank(ascending=False, method="min"),
                 "conversion": conversion(med, mean, ss),
                 "capturable_mean": mean[f"swing_capturable_pct_{ss}"],
                 "swing_n_mean": mean[f"swing_n_{ss}"],

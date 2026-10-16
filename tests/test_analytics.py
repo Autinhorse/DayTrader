@@ -536,6 +536,28 @@ def test_review_days_figures_and_exclusion(ds):
         assert len(figs) == 1 and len(figs[0].axes) == 4  # 3 张小图 + 1 个空位
 
 
+def test_merge_periods_and_tradable_score(ds):
+    kw = {"history": ds.history, "benchmark_tickers": (), "adr_days": 2}
+    full = build_report(["AAA", "BBB", "CCC"], "2026-01-07", "2026-01-09", **kw)
+    merged = build_report(
+        ["AAA", "BBB", "CCC"], "2026-01-07", "2026-01-09",
+        merge_periods=(("2026-01-07", "2026-01-07"), ("2026-01-09", "2026-01-09")), **kw,
+    )  # fmt: skip
+    assert set(merged.daily["date"]) == {date(2026, 1, 7), date(2026, 1, 9)}
+    assert set(merged.swings["date"]) <= {date(2026, 1, 7), date(2026, 1, 9)}
+    # 区间之间的 1 月 8 日照样读取，1 月 9 日的 ADR 和连续计算时一样
+    a = full.daily.set_index(["symbol", "date"])["adr"]
+    b = merged.daily.set_index(["symbol", "date"])["adr"]
+    assert b.to_numpy() == pytest.approx(a.loc[b.index].to_numpy())
+    assert any("合并区间" in n for n in merged.notes)
+    r = full.ranking
+    assert list(r.index) == list(r["score_tradable"].sort_values(ascending=False).index)
+    # 每日转化效率中位数 = 每天 可获取波动 / ADR% 的中位数
+    d = full.daily[full.daily["symbol"] == "AAA"]
+    expect = (d["swing_capturable_pct_k025"] / d["adr_pct"]).median()
+    assert r.at["AAA", "daily_conversion_median"] == pytest.approx(expect)
+
+
 def test_adr_shortfall_is_excluded(ds):
     rep = build_report(
         ["AAA"], "2026-01-05", "2026-01-09", history=ds.history, benchmark_tickers=(), adr_days=2,

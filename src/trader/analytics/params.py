@@ -88,7 +88,17 @@ class ReportParams:
             "swing_avg_pct": 0.3,
         }
     )
-    detail_count: int = 3  # 单只证券详情默认取综合得分前几名
+    # 可交易性评分（主排序，v3.3）：可获取波动均值（绝对值）、转化效率、每日转化效率中位数
+    tradable_weights: dict[str, float] = field(
+        default_factory=lambda: {
+            "capturable_mean": 0.4,
+            "conversion": 0.3,
+            "daily_conversion_median": 0.3,
+        }
+    )
+    # 合并区间：几个日期区间合成一个样本（例如两个不相连的季度）；None = 只用 start~end
+    merge_periods: tuple[tuple[str, str], ...] | None = None
+    detail_count: int = 3  # 单只证券详情默认取可交易性评分前几名
     review_plot_max: int = 16  # 数据异常日、行为特殊日各最多画几张核对图
 
     def cost_pct(self, price: float) -> float:

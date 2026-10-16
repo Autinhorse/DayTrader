@@ -175,6 +175,12 @@ def test_feed_interruption_pauses_strategy_and_buttons(tmp_path: Path, dataset):
     assert r.positions() == {}
     st = r.status()
     assert st["strategy_paused"] and st["positions"] == {} and "AAA" not in st["stale"]
+    # 人工全部平仓后停止新开仓，但可以解除（不像收盘前平仓那样锁到收盘）
+    assert st["halt_all_new"] and not st["flattening"]
+
+    r.halt_new(False)
+    # 解除后两个标记都不在：风控里"停止新开仓"（halted）和"收盘前平仓"（time_window）都不会再拒绝
+    assert not e.oms.halt_all_new and not e.oms.session.flattening
     r.close()
 
 

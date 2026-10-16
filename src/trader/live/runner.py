@@ -375,9 +375,14 @@ class LiveRunner:
             e = self.engine
             syms = [s for s, p in e.portfolio.positions.items() if p.qty != 0]
             syms += [o.intent.symbol for o in e.oms.open_orders()]
+            # 同时停止新开仓（策略和手动都算），界面上"已停止新开仓"按钮可以随时解除；
+            # 不用收盘前平仓那种锁到收盘的标记（2026-10-16 模拟测试：全部平仓后再也无法手动下单）
+            e.oms.halt_all_new = True
             e.oms.flatten(e.clock.now(), sorted(set(syms)), code="manual_flatten",
-                          outside_rth=e.oms.session.session != "regular")  # fmt: skip
-            self._alert(self.now(), "risk", f"人工平仓：{sorted(set(syms))}")
+                          outside_rth=e.oms.session.session != "regular",
+                          lock_day=False)  # fmt: skip
+            msg = f"人工平仓：{sorted(set(syms))}；已停止新开仓，需要时在界面点击恢复"
+            self._alert(self.now(), "risk", msg)
 
     # ---------- 半自动确认（DESIGN.md 8.6） ----------
 

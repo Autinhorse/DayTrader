@@ -587,14 +587,22 @@ class OrderManager:
     # ---------- 收盘前平仓（DESIGN.md 8.4） ----------
 
     def flatten(
-        self, now: int, symbols: list[str], code: str = "eod_flatten", outside_rth: bool = False
+        self,
+        now: int,
+        symbols: list[str],
+        code: str = "eod_flatten",
+        outside_rth: bool = False,
+        lock_day: bool = True,
     ) -> None:
         """停止新开仓 → 撤销全部挂单 → 等撤单确认 → 按实际持仓发平仓单。
 
         常规时段内用市价单；盘后（outside_rth）只能用限价单，按最新价让价 1% 的可成交限价。
         不等撤单确认就平仓，括号单的子单可能同时成交，把持仓打成反向（DESIGN.md 8.4）。
+        lock_day=True（收盘前平仓）：当天剩下的时间都不能再开仓；人工"全部平仓"传 False，
+        由调用方用可以解除的 halt_all_new 停止新开仓。
         """
-        self.session.flattening = True
+        if lock_day:
+            self.session.flattening = True
         for sym in symbols:
             self._flatten_pending[sym] = (code, outside_rth)
         for o in self.open_orders():
@@ -631,7 +639,9 @@ class OrderManager:
                 order_type="LMT" if outside_rth else "MKT",
                 limit_price=limit,
                 outside_rth=outside_rth,
-                reason=Reason(code, "收盘前强制平仓"),
+                reason=Reason(
+                    code, "人工全部平仓" if code == "manual_flatten" else "收盘前强制平仓"
+                ),
             )
             self.submit(intent, now, exit_order=True)
 

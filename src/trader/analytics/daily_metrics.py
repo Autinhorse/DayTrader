@@ -211,6 +211,7 @@ def compute_day(inp: DayInput, p: ReportParams) -> DayResult:
         if math.isfinite(adr)
         else math.nan,
     }
+    met.update(opening_range(inp, o, adr, p.opening_windows_min))
     met["cost_pct"] = p.cost_pct(met["raw_open"])
     met["fixed_prints"] = float(inp.fixed_prints)
     met["changed_minutes"] = float(inp.changed_minutes)
@@ -258,6 +259,36 @@ def compute_day(inp: DayInput, p: ReportParams) -> DayResult:
 
     buckets = _buckets(inp, p, pb, score_sw)
     return DayResult(met, swings, legs, buckets)
+
+
+def opening_range(inp: DayInput, o: float, adr: float, windows: tuple[int, ...]) -> dict:
+    """开盘区间（开盘后 n 分钟）和之后的走势，全部以 ADR 为单位、相对开盘价（决策 0015）：
+    or_hi_n / or_lo_n 区间最高、最低（or_lo 为正数 = 开盘价以下多少）；or_px_n 第 n 分钟末的价格；
+    post_hi_n / post_lo_n 第 n 分钟以后的最高、最低（同样的符号约定）；
+    brk_up_n / brk_dn_n 第一次突破区间上沿、下沿的时刻（距开盘分钟数，bar 起点），没突破为 nan。"""
+    m1 = inp.m1
+    out: dict[str, float] = {}
+    for n in windows:
+        keys = ("or_hi", "or_lo", "or_px", "post_hi", "post_lo", "brk_up", "brk_dn")
+        res = dict.fromkeys(keys, math.nan)
+        cut = inp.day_open + n * MIN_NS
+        head = m1.ts < cut
+        if math.isfinite(adr) and adr > 0 and head.any() and (~head).any():
+            hi, lo = float(m1.high[head].max()), float(m1.low[head].min())
+            tail_h, tail_l, tail_t = m1.high[~head], m1.low[~head], m1.ts[~head]
+            up, dn = np.flatnonzero(tail_h > hi), np.flatnonzero(tail_l < lo)
+            res = {
+                "or_hi": (hi - o) / adr,
+                "or_lo": (o - lo) / adr,
+                "or_px": (float(m1.close[head][-1]) - o) / adr,
+                "post_hi": (float(tail_h.max()) - o) / adr,
+                "post_lo": (o - float(tail_l.min())) / adr,
+                "brk_up": (int(tail_t[up[0]]) - inp.day_open) / MIN_NS if len(up) else math.nan,
+                "brk_dn": (int(tail_t[dn[0]]) - inp.day_open) / MIN_NS if len(dn) else math.nan,
+            }
+        for k in keys:
+            out[f"{k}_{n}"] = res[k]
+    return out
 
 
 def _swing_stats(sw: list[Swing], sfx: str, theta: float, adr: float, cost: float) -> dict:

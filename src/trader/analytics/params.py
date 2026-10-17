@@ -33,6 +33,8 @@ class ReportParams:
     swing_skip_open_min: int = 5
     # 开盘剔除对照：分别剔除开盘后这些分钟，各算一套排名（0 = 不剔除）
     open_skip_compare: tuple[int, ...] = (0, 5, 15, 30, 90)
+    # 开盘区间（决策 0015）：开盘后这些分钟的最高、最低价和之后的走势（ADR 为单位，相对开盘价）
+    opening_windows_min: tuple[int, ...] = (30, 60, 90)
     vwap_cross_min_hold: int = 3  # 分钟（钟表时间）
     # 单边成本（基点），按当日实际开盘价（未复权）分档：(价格上限, 基点)，最后一档的上限为 None
     cost_tiers_bps: tuple[tuple[float | None, float], ...] = (

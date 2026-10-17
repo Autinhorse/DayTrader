@@ -15,6 +15,8 @@ _SKIP = {
     "open", "high", "low", "close", "adr", "raw_open", "cost_pct", "pm_high", "pm_low",
     "filter_limit",
 }  # fmt: skip
+# 开盘区间的逐日字段（决策 0015）只给 analytics.opening 用，不进汇总表
+_OPENING_PREFIXES = ("or_hi_", "or_lo_", "or_px_", "post_hi_", "post_lo_", "brk_up_", "brk_dn_")
 _FIXED = {
     "symbol", "date", "benchmark", "early_close", "possible_halt", "adr_ok", "included",
     "data_issue", "data_reason", "special_day", "special_reason",
@@ -28,6 +30,7 @@ def metric_columns(daily: pd.DataFrame) -> list[str]:
         for c in daily.columns
         if c not in fixed
         and c not in _SKIP
+        and not c.startswith(_OPENING_PREFIXES)
         and pd.api.types.is_numeric_dtype(daily[c])
         and not pd.api.types.is_bool_dtype(daily[c])
     ]

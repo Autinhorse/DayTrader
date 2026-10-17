@@ -24,6 +24,7 @@ from trader.analytics.cleaning import (
 )
 from trader.analytics.daily_metrics import Bars, DayInput, compute_day, efficiency, vwap_crosses
 from trader.analytics.extended_hours import EthDay, eth_metrics
+from trader.analytics.frames import included
 from trader.analytics.loader import adr_series
 from trader.analytics.quality import flag_anomalies, outlier_bars
 from trader.analytics.swings import find_swings
@@ -616,3 +617,62 @@ def test_period_rankings_and_stability(tmp_path):
     assert report.fig_period_ranks(pr, list(s.index)).axes
     with pytest.raises(ValueError):
         stability.period_labels(col(pr, "period"), "W")
+
+
+def test_opening_range_fields():
+    from trader.analytics.daily_metrics import opening_range
+
+    # 每分钟一根：前 30 分钟在 100–101 之间，之后涨到 103 再跌回 100.5
+    prices = [100.5 + 0.5 * math.sin(i) for i in range(30)] + [102.0, 103.0, 101.0, 100.5]
+    m1 = flat(prices)
+    inp = DayInput(day_open=0, day_close=len(prices) * 60 * 10**9, m1=m1, path_bars=m1, adr=2.0,
+                   pc=100.0)  # fmt: skip
+    r = opening_range(inp, prices[0], 2.0, (30,))
+    hi, lo = max(prices[:30]), min(prices[:30])
+    assert r["or_hi_30"] == pytest.approx((hi - prices[0]) / 2)
+    assert r["or_lo_30"] == pytest.approx((prices[0] - lo) / 2)
+    assert r["post_hi_30"] == pytest.approx((103.0 - prices[0]) / 2)
+    assert r["brk_up_30"] == 30.0 and math.isnan(r["brk_dn_30"])
+    # ADR 不足或区间之后没有 bar 时为空
+    assert math.isnan(opening_range(inp, prices[0], math.nan, (30,))["or_hi_30"])
+    assert math.isnan(opening_range(inp, prices[0], 2.0, (40,))["or_hi_40"])
+
+
+def test_opening_outcomes(ds):
+    from trader.analytics import opening
+
+    rep = build_report(
+        ["AAA", "BBB"], "2026-01-07", "2026-01-09", history=ds.history,
+        benchmark_tickers=("CCC",), adr_days=2, opening_windows_min=(30, 60),
+    )  # fmt: skip
+    assert "or_hi_30" not in rep.medians.columns  # 逐日字段不进汇总表
+    d = opening.included_days(rep)
+    assert set(d["symbol"]) == {"AAA", "BBB"}
+    ex = opening.extremes_summary(d, (30, 60))
+    assert list(ex.index) == ["AAA", "BBB", "全部"]
+    assert (ex["both_60"] <= ex["either_60"]).all() and (ex["high_30"] <= ex["high_60"]).all()
+    assert opening.extremes_histogram(d).sum().to_numpy() == pytest.approx([1.0, 1.0])
+    out = opening.day_outcomes(d, 60)
+    assert len(out) == 6 and set(out["type"]) <= set(opening.TYPES)
+    # 分类和字段一致：区间内 = 高低点都已出现
+    inside = (out["type"] == "区间内").to_numpy()
+    assert (inside == (out["high_set"] & out["low_set"]).to_numpy()).all()
+    sh = opening.type_shares(out)
+    assert float(sh.loc["全部", list(opening.TYPES)].sum()) == pytest.approx(1.0)
+    f = opening.features(rep.daily, 60, ref="CCC")
+    first = f.sort_values("date").groupby("symbol").head(1)
+    assert first["prev_range"].isna().to_numpy().all()  # 第一天没有"昨天"
+    assert bool(((f["or_pos"] >= 0) & (f["or_pos"] <= 1)).all())
+    assert (f.loc[f["symbol"] == "CCC", "same_dir"] == 1).all()
+    t = opening.conditional(out, f, "or_width", bins=2)
+    assert t.loc["全部", "days"] == 6
+    assert set(opening.conditional(out, f, "same_dir").index) <= {"是", "否", "全部"}
+    al = opening.ref_alignment(out, rep.daily, 60, ref="CCC")
+    assert al.loc["全部", "占比"] == 1.0
+    fs = opening.factor_summary(out, f, ["or_width", "gap"], bins=2)
+    assert len(fs) == 2 and bool((fs.fillna(0) >= 0).to_numpy().all())
+    from trader.analytics import report
+
+    assert report.fig_extremes_hist({"AAA": opening.extremes_histogram(d)}).axes
+    sync = opening.ref_sync(included(rep.daily), ref="CCC")
+    assert list(sync.index) == ["AAA", "BBB", "全部"]

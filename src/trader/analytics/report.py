@@ -451,3 +451,22 @@ def fig_period_ranks(pr: pd.DataFrame, order: list[str] | None = None) -> Figure
     ax.set_title("各段可交易性评分名次（数字为段内名次，颜色越深越靠前；空格 = 未参加排名）")
     fig.tight_layout()
     return fig
+
+
+def fig_extremes_hist(hists: dict[str, pd.DataFrame]) -> Figure:
+    """全天最高价、最低价出现时刻的分布（opening.extremes_histogram 的结果）。
+    hists：名称 → 分布表，第一个用主色，其余用灰色。"""
+    fig, axes = plt.subplots(1, 2, figsize=(13, 3.8), sharey=True)
+    for ax, kind in zip(axes, ("最高价", "最低价"), strict=True):
+        width = 0.8 / max(len(hists), 1)
+        for i, (name, h) in enumerate(hists.items()):
+            x = np.arange(len(h)) + (i - (len(hists) - 1) / 2) * width
+            ax.bar(x, h[kind].to_numpy() * 100, width, label=name,
+                   color=MAIN_COLOR if i == 0 else BENCH_COLOR)  # fmt: skip
+        first = next(iter(hists.values()))
+        ax.set_xticks(range(0, len(first), 2), list(first.index)[::2], rotation=45)
+        ax.set_title(f"全天{kind}出现的时刻（美东时间，每 15 分钟一档）")
+        ax.set_ylabel("占天数 %")
+        ax.legend()
+    fig.tight_layout()
+    return fig

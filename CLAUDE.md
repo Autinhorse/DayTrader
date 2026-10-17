@@ -54,6 +54,8 @@ load_run, sweep`，示例 `user/notebooks/`。见 docs/decisions/0006。
 notebook `user/notebooks/日内波动报表.ipynb`；主排序是可交易性评分（可获取波动、转化效率、每日转化效率中位数）；只用常规时段打分、只计开盘 5 分钟后开始的摆动（另有 0/5/15/30/90 分钟对照），归一化用 ADR（21 日振幅中位数），价格复权到区间末日；
 计算前清洗数据（`analytics.cleaning`，坏数据时段清单 `config/bad_data_windows.yaml`，只用于本报表）；
 只依赖 data/core，导出到 `reports/`（不进 git）。
+排名稳定性（决策 0014）：`trader.analytics.stability` 把长区间报表按季度切段打分，notebook `user/notebooks/排名稳定性.ipynb`。
+历史数据分析的结论汇总在 `docs/研究记录.md`（做了什么、结论、怎么得到、数据文件）；每轮分析有值得保留的结论就追加一节并更新总览。
 实盘版（阶段 6，决策 0007）：`trader.live.runner.LiveRunner` + `trader.brokers.ibkr`（`api.IbApi` 薄接口，
 测试用 `tests/fake_ib.py`，永不连接真实 IBKR）；实时 1 秒 bar 由 `trader.data.bar_builder` 生成，
 当天历史 `trader.data.live_history.LiveHistory`；引擎 `start(live=True)` + `push()`。

@@ -425,3 +425,29 @@ def fig_eth_scatter(rep: VolReport) -> tuple[Figure, float, float]:
 
 # 指标和分数的说明（Markdown），notebook 第 9 部分显示
 METRIC_NOTES = Path(__file__).with_name("metric_notes.md").read_text(encoding="utf-8")
+
+
+def fig_period_ranks(pr: pd.DataFrame, order: list[str] | None = None) -> Figure:
+    """证券 × 分段 的名次热力图（stability.period_rankings 的结果）；
+    颜色越深名次越靠前，空格 = 未参加。
+    order：行的顺序（通常用 stability_summary 的索引），默认按名次中位数。"""
+    w = pr.pivot(index="symbol", columns="period", values="rank")
+    w = w.reindex(order) if order is not None else w.loc[w.median(axis=1).sort_values().index]
+    n = pr.groupby("period")["n_symbols"].first().reindex(w.columns)
+    frac = w / n  # 名次占段内证券数的比例，各段证券数不同时也可比
+    fig, ax = plt.subplots(figsize=(0.62 * len(w.columns) + 2.5, 0.4 * len(w) + 1.6))
+    if w.empty:
+        return fig
+    ax.imshow(frac.to_numpy(dtype=float), aspect="auto", cmap="Blues_r", vmin=0, vmax=1.15)
+    ax.set_xticks(range(len(w.columns)), list(w.columns), rotation=45)
+    ax.set_yticks(range(len(w.index)), list(w.index))
+    for i in range(w.shape[0]):
+        for j in range(w.shape[1]):
+            v = w.iat[i, j]
+            if v == v:
+                dark = frac.iat[i, j] < 0.35
+                ax.text(j, i, f"{v:.0f}", ha="center", va="center", fontsize=8,
+                        color="white" if dark else "black")  # fmt: skip
+    ax.set_title("各段可交易性评分名次（数字为段内名次，颜色越深越靠前；空格 = 未参加排名）")
+    fig.tight_layout()
+    return fig

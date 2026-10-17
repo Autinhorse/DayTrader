@@ -574,3 +574,45 @@ def test_adr_shortfall_is_excluded(ds):
 def test_score_k_must_be_a_threshold(ds):
     with pytest.raises(ValueError, match="score_k"):
         build_report(["AAA"], "2026-01-07", "2026-01-09", history=ds.history, score_k=0.3)
+
+
+def test_period_rankings_and_stability(tmp_path):
+    from trader.analytics import report, stability
+    from trader.analytics.frames import col, rows
+
+    days = [date(2026, 1, d) for d in (5, 6, 7, 8, 9)] + [date(2026, 2, d) for d in (2, 3, 4)]
+    data = make_dataset(tmp_path, days, symbols=("AAA", "BBB", "CCC", "DDD"))
+    rep = build_report(
+        ["AAA", "BBB", "CCC"], "2026-01-05", "2026-02-04", history=data.history,
+        benchmark_tickers=("DDD",), adr_days=2,
+    )  # fmt: skip
+    pr = stability.period_rankings(rep, "M", min_days=3)
+    assert sorted(set(pr["period"])) == ["2026-01", "2026-02"]
+    jan = pr[pr["period"] == "2026-01"].set_index("symbol")
+    assert (jan["days"] == 3).all()  # 1 月 5、6 日 ADR 数据不足，不参与汇总
+    assert sorted(jan["rank"]) == [1, 2, 3, 4] and bool(jan.at["DDD", "benchmark"])
+    # 每段的评分 = 只用这一段的日子单独出报表时的评分
+    only = rows(rep.daily, rep.daily["date"] >= date(2026, 2, 1))
+    sub = pr[pr["period"] == "2026-02"].set_index("symbol")["score_tradable"]
+    from trader.analytics import aggregate, scoring
+
+    med, mean = aggregate.medians(only), aggregate.means(only)
+    dr = aggregate.capturable_days_ratio(only, 0.25)
+    expect = scoring.score(med, mean, dr, only, rep.params)["score_tradable"]
+    assert sub.sort_index().to_numpy() == pytest.approx(expect.sort_index().to_numpy())
+    # 天数不足 min_days 的证券不参加；没有一段够数时报错
+    with pytest.raises(ValueError):
+        stability.period_rankings(rep, "M", min_days=4)
+
+    s = stability.stability_summary(pr, top_n=2)
+    assert (s["periods"] == 2).all() and ((s["top_share"] >= 0) & (s["top_share"] <= 1)).all()
+    assert s["score_median"].is_monotonic_decreasing
+    rc = stability.adjacent_rank_corr(pr)
+    assert list(rc.index) == ["2026-01→2026-02"] and -1 <= rc.iloc[0] <= 1
+    assert list(stability.lagged_rank_corr(pr, 2).index) == [1, 2]
+    sel = stability.selection_check(pr, lookback=1, top_n=2)
+    assert list(sel.index) == ["2026-02"] and "DDD" not in sel.at["2026-02", "picked"]
+    assert 0 <= sel.at["2026-02", "hit"] <= 2
+    assert report.fig_period_ranks(pr, list(s.index)).axes
+    with pytest.raises(ValueError):
+        stability.period_labels(col(pr, "period"), "W")

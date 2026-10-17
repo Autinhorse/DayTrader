@@ -36,6 +36,17 @@ def _history() -> HistoryService:
     return HistoryService(data_dir(), TradingCalendar(), Catalog(data_dir() / "catalog.sqlite"))
 
 
+def with_bad_windows(p: ReportParams) -> ReportParams:
+    """bad_windows 为 None 时读 config/bad_data_windows.yaml。"""
+    if p.bad_windows is not None:
+        return p
+    from trader.config import project_dir
+
+    return replace(
+        p, bad_windows=load_bad_windows(project_dir() / "config" / "bad_data_windows.yaml")
+    )
+
+
 @dataclass
 class VolReport:
     params: ReportParams
@@ -142,13 +153,7 @@ def build_report(
     history: HistoryService | None = None,
     **overrides: Any,
 ) -> VolReport:
-    p = replace(params or ReportParams(), **overrides)
-    if p.bad_windows is None:
-        from trader.config import project_dir
-
-        p = replace(
-            p, bad_windows=load_bad_windows(project_dir() / "config" / "bad_data_windows.yaml")
-        )
+    p = with_bad_windows(replace(params or ReportParams(), **overrides))
     if p.score_k not in p.swing_thresholds_adr:
         raise ValueError(
             f"score_k={p.score_k} 必须在 swing_thresholds_adr {p.swing_thresholds_adr} 里"

@@ -56,6 +56,8 @@ notebook `user/notebooks/日内波动报表.ipynb`；主排序是可交易性评
 只依赖 data/core，导出到 `reports/`（不进 git）。
 排名稳定性（决策 0014）：`trader.analytics.stability` 把长区间报表按季度切段打分，notebook `user/notebooks/排名稳定性.ipynb`。
 开盘区间与高低点（决策 0015）：`trader.analytics.opening`，notebook `user/notebooks/开盘区间与高低点.ipynb`。
+开盘区间交易快速模拟（决策 0016）：`trader.analytics.or_trades`（1 分钟 bar、保守成交假设，只做筛选），
+notebook `user/notebooks/开盘区间交易模拟.ipynb`。
 历史数据分析的结论汇总在 `docs/研究记录.md`（做了什么、结论、怎么得到、数据文件）；每轮分析有值得保留的结论就追加一节并更新总览。
 实盘版（阶段 6，决策 0007）：`trader.live.runner.LiveRunner` + `trader.brokers.ibkr`（`api.IbApi` 薄接口，
 测试用 `tests/fake_ib.py`，永不连接真实 IBKR）；实时 1 秒 bar 由 `trader.data.bar_builder` 生成，

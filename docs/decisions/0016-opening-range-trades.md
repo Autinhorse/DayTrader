@@ -27,3 +27,16 @@
 5. 筛选出有希望的规则后，再写成正式策略用回测引擎确认；快速模拟的结果不直接作为上线依据。
 
 notebook `user/notebooks/开盘区间交易模拟.ipynb`；结果见 `docs/研究记录.md` 2026-10-17 第三节。
+
+## 补充（同日）：VWAP 条件
+
+用户要求在入场上加入 VWAP。`MinuteDay` 增加开盘起的累计 VWAP（`daily_metrics.cumulative_vwap`，与报表的 VWAP 穿越同一口径），
+`CACHE_VERSION` 改为 2，旧缓存自动失效。`Rule` 增加：
+
+- `target="vwap"`：每根 bar 开始时按上一根为止的 VWAP 挂平仓限价单；VWAP 移过入场价时按开盘价立即成交；
+- `vwap_side`（any / toward / away）、`vwap_min_adr`：价格相对 VWAP 的位置和距离；
+- `vwap_slope_min`：入场前 30 分钟 VWAP 朝交易方向的变化下限（ADR）。
+
+信号时刻的 VWAP：挂单类入场用到上一根 bar 为止的，收盘入场用到入场 bar 为止的，没有未来数据。
+VWAP 条件只检查当天第一个信号，不满足这天就不做（和"每天第一个信号"的规则一致，不额外寻找后面的信号）。
+每笔交易另记 `vwap_dist`、`vwap_slope`，用于分档分析。结果见研究记录 2026-10-17 第四节。

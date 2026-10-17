@@ -11,7 +11,10 @@
 - 限价单（边缘反向的入场、止盈）按限价成交，越过限价开盘的按开盘价；
   止损单、市价单（收回后入场、收盘平仓）另加 slip_adr 的滑点；
 - 成本按报表的分档（当天实际开盘价）买卖各扣一次；
-- 每只证券每天最多一笔，last_entry_min 以后不再开仓，exit_min 时按收盘价平仓。
+- 每只证券每天最多一笔，last_entry_min 以后不再开仓，exit_min 时按收盘价平仓；
+- VWAP 是开盘起的累计 VWAP。挂单类判断（边缘反向、突破跟随的入场，VWAP 目标）
+  用到上一根 bar 为止的 VWAP，收盘入场（假突破收回）用到入场 bar 为止的 VWAP。
+  VWAP 条件只检查当天第一个信号，不满足这天就不做。
 开盘区间只用第 n 分钟以前的 bar，信号只用已经走完的 bar，没有未来数据。
 """
 
@@ -25,7 +28,7 @@ from typing import Any, cast
 import numpy as np
 import pandas as pd
 
-from trader.analytics.daily_metrics import MIN_NS
+from trader.analytics.daily_metrics import MIN_NS, cumulative_vwap
 from trader.analytics.frames import col, rows
 from trader.analytics.loader import load_symbol
 from trader.analytics.params import ReportParams
@@ -36,7 +39,18 @@ KINDS = {
     "reclaim": "假突破收回：突破以后，第一根收回区间里的 bar 收盘反向入场",
     "breakout": "突破跟随（对照）：第一次突破上沿做多 / 下沿做空（止损单）",
 }
-TARGETS = {"mid": "区间中线", "opposite": "区间对边", "close": "不设目标，持有到收盘"}
+TARGETS = {
+    "mid": "区间中线",
+    "opposite": "区间对边",
+    "vwap": "VWAP（每分钟按最新 VWAP 调整的限价单）",
+    "close": "不设目标，持有到收盘",
+}
+VWAP_SIDES = {
+    "any": "不看 VWAP",
+    "toward": "交易方向朝着 VWAP（做空时价格在 VWAP 上方、做多时在下方）：回归 VWAP",
+    "away": "交易方向背离 VWAP（做空时价格已在 VWAP 下方、做多时在上方）：顺着当天的强弱",
+}
+CACHE_VERSION = 2  # MinuteDay 字段变化时加 1，notebook 的缓存随之失效
 REASONS = ("目标", "止损", "收盘")
 
 
@@ -53,13 +67,16 @@ class MinuteDay:
     close: np.ndarray
     adr: float  # 前一交易日的 ADR
     cost_pct: float  # 单边成本（百分数）
+    vwap: np.ndarray | None = None  # 开盘起到这根 bar（含）为止的累计 VWAP；None 时 VWAP 规则不可用
 
 
 @dataclass(frozen=True, slots=True)
 class Rule:
     """kind：fade / reclaim / breakout（KINDS）；n：开盘区间分钟数；target：mid / opposite / close。
     止损：fade 在区间边缘之外 stop_adr；reclaim 在突破以来的极值之外 stop_adr；
-    breakout 在区间中线（stop_at="mid"）或对边（"opposite"）。距离都以 ADR 为单位。"""
+    breakout 在区间中线（stop_at="mid"）或对边（"opposite"）。距离都以 ADR 为单位。
+    vwap_side：any / toward / away（VWAP_SIDES）；vwap_min_adr：入场价离 VWAP 至少多远（ADR）；
+    vwap_slope_min：入场前 30 分钟 VWAP 的变化下限（见 simulate 的 vwap_slope）。"""
 
     kind: str
     n: int = 60
@@ -69,19 +86,36 @@ class Rule:
     slip_adr: float = 0.01
     last_entry_min: int = 330  # 15:00 以后不开新仓
     exit_min: int = 385  # 15:55 这根 bar 开始前平仓（用 15:54 那根 bar 的收盘价）
+    vwap_side: str = "any"
+    vwap_min_adr: float = 0.0
+    # 入场前 30 分钟 VWAP 朝交易方向的变化至少这么多（ADR）；None = 不看。
+    # 例如 -0.025：VWAP 逆着交易方向移动不超过 0.025 ADR（反向交易时"当天的趋势不太强"）
+    vwap_slope_min: float | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
             raise ValueError(f"kind 只能是 {'/'.join(KINDS)}")
         if self.target not in TARGETS:
             raise ValueError(f"target 只能是 {'/'.join(TARGETS)}")
+        if self.vwap_side not in VWAP_SIDES:
+            raise ValueError(f"vwap_side 只能是 {'/'.join(VWAP_SIDES)}")
+        if self.target == "vwap" and self.vwap_side == "away":
+            raise ValueError("背离 VWAP 的交易不能以 VWAP 为目标（目标在亏损的一边）")
 
     @property
     def label(self) -> str:
+        v = ""
+        if self.vwap_side != "any":
+            v = " 朝VWAP" if self.vwap_side == "toward" else " 背离VWAP"
+            if self.vwap_min_adr > 0:
+                v += f"≥{self.vwap_min_adr:g}ADR"
+        if self.vwap_slope_min is not None:
+            v += f" VWAP斜率≥{self.vwap_slope_min:g}"
         if self.kind == "breakout":
-            return f"突破跟随 n={self.n} 止损{'中线' if self.stop_at == 'mid' else '对边'}"
+            return f"突破跟随 n={self.n} 止损{'中线' if self.stop_at == 'mid' else '对边'}{v}"
         name = "边缘反向" if self.kind == "fade" else "假突破收回"
-        return f"{name} n={self.n} 目标{TARGETS[self.target]} 止损{self.stop_adr:g}ADR"
+        tgt = "VWAP" if self.target == "vwap" else TARGETS[self.target]
+        return f"{name} n={self.n} 目标{tgt} 止损{self.stop_adr:g}ADR{v}"
 
 
 def load_minutes(
@@ -118,6 +152,7 @@ def load_minutes(
                     close=m.close.astype(np.float32),
                     adr=float(inp.adr),
                     cost_pct=p.cost_pct(raw),
+                    vwap=cumulative_vwap(m).astype(np.float32),
                 )
             )
     return out
@@ -127,10 +162,15 @@ def simulate(days: list[MinuteDay], rule: Rule) -> pd.DataFrame:
     """每笔交易一行：symbol、date、side（1 多 / -1 空）、or_width（区间宽度，ADR）、
     entry_min / exit_min（距开盘分钟）、entry / exit（价格）、reason（目标 / 止损 / 收盘）、
     risk_adr（入场到止损，ADR）、ret_pct（扣成本后的收益率，%）、ret_adr（扣成本后，ADR）、
-    r（扣成本后的收益 / 入场时的风险）；cost_pct 这笔交易的买卖成本合计（%）。"""
+    r（扣成本后的收益 / 入场时的风险）；cost_pct 这笔交易的买卖成本合计（%）；
+    vwap_dist 入场时 VWAP 在交易方向上的距离（ADR，正 = 朝着 VWAP，负 = 背离；没有 VWAP 为空）；
+    vwap_slope 入场前 30 分钟 VWAP 的变化（ADR，正 = VWAP 正朝交易方向移动）。
+    注意：开盘区间边缘的交易，VWAP 几乎总在区间里面，所以反向交易几乎都"朝着 VWAP"、
+    突破跟随几乎都"背离 VWAP"，有区分度的是距离 vwap_dist 和斜率 vwap_slope。"""
     found = [t for d in days if (t := _one_day(d, rule)) is not None]
     cols = ["symbol", "date", "side", "or_width", "entry_min", "exit_min", "entry", "exit",
-            "reason", "risk_adr", "ret_pct", "ret_adr", "r", "cost_pct"]  # fmt: skip
+            "reason", "risk_adr", "ret_pct", "ret_adr", "r", "cost_pct",
+            "vwap_dist", "vwap_slope"]  # fmt: skip
     return pd.DataFrame(found, columns=cols)
 
 
@@ -178,12 +218,39 @@ def _one_day(d: MinuteDay, rule: Rule) -> dict[str, Any] | None:
     if entry is None or not isinstance(entry, tuple):
         return None
     i, side, px, stop = entry
-    target = {"mid": mid, "opposite": lo if side < 0 else hi, "close": math.nan}[rule.target]
-    if rule.kind == "breakout":
-        target = math.nan
-    if side * (stop - px) >= 0 or (math.isfinite(target) and side * (target - px) <= 0):
+    uses_vwap = (
+        rule.vwap_side != "any"
+        or rule.vwap_slope_min is not None
+        or (rule.target == "vwap" and rule.kind != "breakout")
+    )
+    if uses_vwap and d.vwap is None:
+        raise ValueError("这批数据没有 VWAP，请用新版 load_minutes 重新读取")
+    vw = d.vwap.astype(np.float64) if d.vwap is not None else None
+    # 入场时已知的 VWAP：收盘入场用到这根 bar 为止的，挂单入场用到上一根为止的
+    k = i if rule.kind == "reclaim" else i - 1
+    vw_now = math.nan if vw is None else float(vw[k])
+    # VWAP 最近 30 分钟的变化，正 = 朝交易方向移动（做空时 VWAP 在下降）
+    vw_slope = math.nan if vw is None else side * (vw_now - float(vw[max(k - 30, 0)])) / adr
+    if rule.vwap_side != "any":
+        dist = side * (vw_now - px)  # > 0：VWAP 在交易方向上
+        if rule.vwap_side == "away":
+            dist = -dist
+        if dist <= 0 or dist < rule.vwap_min_adr * adr:
+            return None
+    if rule.vwap_slope_min is not None and not vw_slope >= rule.vwap_slope_min:
+        return None
+    n_bars = len(mi)
+    if rule.kind == "breakout" or rule.target == "close":
+        tgt = np.full(n_bars, math.nan)
+    elif rule.target == "vwap":
+        assert vw is not None
+        tgt = np.concatenate([[math.nan], vw[:-1]])  # 每根 bar 开始时按上一根为止的 VWAP 挂单
+    else:
+        tgt = np.full(n_bars, mid if rule.target == "mid" else (lo if side < 0 else hi))
+    target0 = vw_now if rule.target == "vwap" and rule.kind != "breakout" else float(tgt[i])
+    if side * (stop - px) >= 0 or (math.isfinite(target0) and side * (target0 - px) <= 0):
         return None  # 入场价已经在止损或目标之外（跳空），不做
-    ex, reason, j = _exit(i, side, px, stop, target, o, h, low, c, slip, last_bar)
+    ex, reason, j = _exit(i, side, px, stop, tgt, o, h, low, c, slip, last_bar)
     cost = d.cost_pct / 100 * (px + ex)
     pnl = side * (ex - px) - cost
     risk = abs(px - stop)
@@ -202,6 +269,8 @@ def _one_day(d: MinuteDay, rule: Rule) -> dict[str, Any] | None:
         "ret_adr": pnl / adr,
         "r": pnl / risk,
         "cost_pct": cost / px * 100,
+        "vwap_dist": side * (vw_now - px) / adr if math.isfinite(vw_now) else math.nan,
+        "vwap_slope": vw_slope,
     }
 
 
@@ -233,19 +302,23 @@ def _reclaim_entry(
 
 
 def _exit(
-    i: int, side: int, px: float, stop: float, target: float,
+    i: int, side: int, px: float, stop: float, tgt: np.ndarray,
     o: np.ndarray, h: np.ndarray, low: np.ndarray, c: np.ndarray, slip: float, last_bar: int,
 ) -> tuple[float, str, int]:  # fmt: skip
-    """入场后逐根 bar 检查：先止损（同一根 bar 里止损和目标都到了按止损），再目标，最后收盘平仓。"""
+    """入场后逐根 bar 检查：先止损（同一根 bar 里止损和目标都到了按止损），
+    再目标（tgt 是每根 bar 的目标价，nan = 没有目标），最后收盘平仓。"""
     for j in range(i, last_bar + 1):
         adverse = h[j] if side < 0 else low[j]
         if side * (stop - adverse) >= 0:  # 碰到止损
             fill = stop if j == i else (max(stop, o[j]) if side < 0 else min(stop, o[j]))
             return fill - side * slip, "止损", j
+        target = float(tgt[j])
         if j > i and math.isfinite(target):
             fav = low[j] if side < 0 else h[j]
             if side * (fav - target) >= 0:
-                return target, "目标", j
+                # 目标已经在不利的一边（VWAP 移过了入场价）：限价单立即按开盘价成交
+                fill = target if side * (target - o[j]) >= 0 else float(o[j])
+                return fill, "目标", j
     return float(c[last_bar]) - side * slip, "收盘", last_bar
 
 

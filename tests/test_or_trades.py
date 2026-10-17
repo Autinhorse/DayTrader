@@ -15,14 +15,16 @@ ADR = 2.0
 
 
 def _day(changes: dict[int, tuple[float, float, float, float]], cost: float = 0.0,
-         day: date = date(2026, 1, 5)) -> T.MinuteDay:  # fmt: skip
+         day: date = date(2026, 1, 5), vwap: np.ndarray | None = None) -> T.MinuteDay:  # fmt: skip
     n = 390
     px = np.full((4, n), 100.5)
     px[:, :60] = 100.0
     px[1, 0], px[2, 1] = 101.0, 99.0
     for i, ohlc in changes.items():
         px[:, i] = ohlc
-    return T.MinuteDay("AAA", day, np.arange(n, dtype=np.int16), *px, adr=ADR, cost_pct=cost)
+    return T.MinuteDay(
+        "AAA", day, np.arange(n, dtype=np.int16), *px, adr=ADR, cost_pct=cost, vwap=vwap
+    )
 
 
 def _one(d: T.MinuteDay, rule: T.Rule) -> dict:
@@ -90,3 +92,47 @@ def test_no_entry_after_cutoff_and_quarter_summary():
     assert s.loc["全部", "trades"] == 2 and s.loc["全部", "win"] == 1.0
     with pytest.raises(ValueError):
         T.Rule("other")
+
+
+def _vw(level: float, later: float | None = None, at: int = 390) -> np.ndarray:
+    v = np.full(390, level)
+    if later is not None:
+        v[at:] = later
+    return v
+
+
+def test_vwap_side_filter():
+    # 第 70 分钟在 101 做空；第 69 分钟为止的 VWAP 100.5 在下方 = 朝着 VWAP（距离 0.5 = 0.25 ADR）
+    t = _one(_day(POKE | DOWN, vwap=_vw(100.5)), T.Rule("fade", vwap_side="toward", slip_adr=0))
+    assert t["vwap_dist"] == pytest.approx(0.25)
+    assert T.simulate([_day(POKE, vwap=_vw(101.5))], T.Rule("fade", vwap_side="toward")).empty
+    away = _one(_day(POKE, vwap=_vw(101.5)), T.Rule("fade", vwap_side="away"))
+    assert away["vwap_dist"] == pytest.approx(-0.25)
+    far = T.Rule("fade", vwap_side="toward", vwap_min_adr=0.3)
+    assert T.simulate([_day(POKE, vwap=_vw(100.5))], far).empty
+    # 第一个信号不满足就不做，不再等后面的信号
+    assert T.simulate(
+        [_day(POKE | DOWN, vwap=_vw(101.5))], T.Rule("fade", vwap_side="toward")
+    ).empty
+
+
+def test_vwap_target():
+    r = T.Rule("fade", target="vwap", slip_adr=0)
+    t = _one(_day(POKE, vwap=_vw(100.5)), r)
+    assert t["reason"] == "目标" and t["exit"] == pytest.approx(100.5) and t["exit_min"] == 71
+    # VWAP 后来移到了入场价上方（亏损一边）：限价买单按开盘价立即成交
+    t = _one(_day(POKE, vwap=_vw(100.2, later=102.0, at=72)), r)
+    assert t["exit_min"] == 73 and t["exit"] == pytest.approx(100.5)
+    with pytest.raises(ValueError):
+        T.Rule("fade", target="vwap", vwap_side="away")
+    with pytest.raises(ValueError):
+        T.simulate([_day(POKE)], r)  # 数据里没有 VWAP
+
+
+def test_vwap_slope_filter():
+    # 第 39 分钟 VWAP 100.0，第 69 分钟 100.5：上升 0.5 = 0.25 ADR，对做空是逆向（斜率 -0.25）
+    v = _vw(100.0, later=100.5, at=40)
+    t = _one(_day(POKE, vwap=v), T.Rule("fade"))
+    assert t["vwap_slope"] == pytest.approx(-0.25)
+    assert T.simulate([_day(POKE, vwap=v)], T.Rule("fade", vwap_slope_min=-0.1)).empty
+    assert len(T.simulate([_day(POKE, vwap=_vw(100.5))], T.Rule("fade", vwap_slope_min=-0.1))) == 1

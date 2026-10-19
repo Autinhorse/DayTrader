@@ -9,7 +9,13 @@ from pathlib import Path
 import pytest
 from tests.fake_ib import FakeIb
 
-from trader.brokers.ibkr.api import HistBar, SafetyError, Snapshot, check_paper_accounts
+from trader.brokers.ibkr.api import (
+    HistBar,
+    SafetyError,
+    Snapshot,
+    check_paper_accounts,
+    decode_ib_message,
+)
 from trader.brokers.ibkr.feed import FeedConfigError, FeedSettings, IbkrFeed
 from trader.core.events import SystemKind
 from trader.core.timeutil import NS_PER_MIN, NS_PER_SEC, ny_to_ns
@@ -55,6 +61,14 @@ def test_tick_limit_is_enforced_not_degraded():
         FeedSettings(["A", "B", "C", "D", "E", "F"], [])
     with pytest.raises(FeedConfigError, match="不能同时"):
         FeedSettings(["A"], ["A"])
+
+
+def test_ib_message_unicode_escapes_are_decoded():
+    raw = r"市场数据场连接正常:usfarm"
+    assert decode_ib_message(raw) == "市场数据场连接正常:usfarm"
+    assert decode_ib_message("Market data farm connection is OK:usfarm") == (
+        "Market data farm connection is OK:usfarm"
+    )
 
 
 def test_paper_safety_checks():

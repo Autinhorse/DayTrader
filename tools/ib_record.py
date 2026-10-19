@@ -31,6 +31,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 os.environ.setdefault("TRADER_HOME", str(ROOT))
 
+from trader.brokers.ibkr.api import decode_ib_message  # noqa: E402
 from trader.config import data_dir, load_universe  # noqa: E402
 
 NY = ZoneInfo("America/New_York")
@@ -136,7 +137,9 @@ async def main_async(args: argparse.Namespace) -> int:
     out_dir = data_dir() / "live" / now_ny.date().isoformat()
 
     ib = IB()
-    ib.errorEvent += lambda reqId, code, msg, contract: print(f"  IB 消息 {code}: {msg}")
+    ib.errorEvent += lambda reqId, code, msg, contract: print(
+        f"  IB 消息 {code}: {decode_ib_message(msg)}"
+    )
     print(f"连接 {args.host}:{args.port}（只读）...")
     await ib.connectAsync(
         args.host, args.port, clientId=args.client_id, readonly=True, fetchFields=StartupFetch(0)

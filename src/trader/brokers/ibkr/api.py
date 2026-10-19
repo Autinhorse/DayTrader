@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -22,6 +23,14 @@ from trader.data.bar_builder import TradeTick
 PAPER_PORTS = frozenset({4002, 7497})
 HIST_TIMEOUT_S = 15.0  # 单次历史数据请求的等待上限
 LIVE_PORTS = frozenset({4001, 7496})
+
+
+_UNICODE_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})")
+
+
+def decode_ib_message(msg: str) -> str:
+    """中文环境的 Gateway 把非 ASCII 字符发成字面的 \\uXXXX，还原成正常文字。"""
+    return _UNICODE_ESCAPE.sub(lambda m: chr(int(m.group(1), 16)), msg)
 
 
 class SafetyError(RuntimeError):
@@ -332,7 +341,12 @@ class IbAsyncApi:
 
     def on_error(self, cb: Callable[[int, int, str, str | None], None]) -> None:
         def handler(req_id: int, code: int, msg: str, contract: Any) -> None:
-            cb(req_id, code, msg, getattr(contract, "symbol", None) if contract else None)
+            cb(
+                req_id,
+                code,
+                decode_ib_message(msg),
+                getattr(contract, "symbol", None) if contract else None,
+            )
 
         self.ib.errorEvent += handler
 

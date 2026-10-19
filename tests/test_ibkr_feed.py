@@ -11,6 +11,7 @@ from tests.fake_ib import FakeIb
 
 from trader.brokers.ibkr.api import (
     HistBar,
+    IbAsyncApi,
     SafetyError,
     Snapshot,
     check_paper_accounts,
@@ -69,6 +70,56 @@ def test_ib_message_unicode_escapes_are_decoded():
     assert decode_ib_message("Market data farm connection is OK:usfarm") == (
         "Market data farm connection is OK:usfarm"
     )
+
+
+@pytest.mark.parametrize(
+    "time_str",
+    ["20261019-14:41:07", "20261019 10:41:07 US/Eastern", "20261019 22:41:07 Asia/Shanghai"],
+)
+def test_execution_time_without_timezone_is_utc(time_str: str):
+    """实时成交回报的时间不带时区时是 UTC，不能按本机时区解读（2026-10-19 曾差 8 小时）。"""
+    from datetime import UTC, datetime
+
+    from ib_async.decoder import Decoder
+
+    api = IbAsyncApi(now=lambda: 0)
+    got = []
+    api.ib.wrapper.execDetails = lambda req_id, c, ex: got.append(ex)  # type: ignore[method-assign]
+    head = [
+        "11",
+        "-1",
+        "7",
+        "265598",
+        "AAPL",
+        "STK",
+        "",
+        "0",
+        "",
+        "",
+        "SMART",
+        "USD",
+        "AAPL",
+        "NMS",
+    ]
+    tail = [
+        "DU1",
+        "ISLAND",
+        "BOT",
+        "1",
+        "345.75",
+        "1",
+        "22",
+        "0",
+        "1",
+        "345.75",
+        "x",
+        "",
+        "",
+        "",
+        "1",
+    ]
+    Decoder(api.ib.wrapper, 176).execDetails([*head, "e1", time_str, *tail])
+    assert got[0].time == datetime(2026, 10, 19, 14, 41, 7, tzinfo=UTC)
 
 
 def test_paper_safety_checks():

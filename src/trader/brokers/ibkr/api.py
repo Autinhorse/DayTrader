@@ -188,6 +188,9 @@ class IbAsyncApi:
         from ib_async import IB
 
         self.ib = IB()
+        # 实时成交回报的时间是不带时区的 UTC（如 20261019-14:41:07）；不设置时 ib_async 按本机时区
+        # 解读，北京时间的电脑上差 8 小时（2026-10-19 实测）。带时区的时间字符串不受影响。
+        self.ib.TimezoneTWS = "UTC"
         self._now = now
         self._contracts: dict[str, Any] = {}
         self._tick_cb: dict[int, tuple[str, Callable[[TradeTick], None]]] = {}

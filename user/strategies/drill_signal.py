@@ -1,13 +1,13 @@
 """测试用策略：只为在模拟账户上演练下单流程，不是交易策略。
 
 常规时段里，没有持仓也没有挂单时，每隔 every_min 分钟在 1 分钟 bar 收盘时出一个买入信号
-（qty 股，括号单：止盈、止损各在收盘价上下 bracket_pct%）；持仓满 hold_min 分钟后市价平仓。
+（qty 股，括号单：止盈、止损各在收盘价上下 bracket_pct%）；从成交起持仓满 hold_min 分钟后市价平仓。
 收盘前平仓由框架处理。
 """
 
 from pydantic import Field
 
-from trader.core.models import Bar, Reason
+from trader.core.models import Bar, Fill, Reason
 from trader.core.timeutil import NS_PER_MIN
 from trader.strategy.base import Strategy, StrategyParams, register_strategy
 
@@ -32,6 +32,11 @@ class DrillSignal(Strategy):
         assert isinstance(p, DrillSignalParams)
         self.p = p
         self.ctx.subscribe(p.symbol, p.timeframe)
+
+    def on_fill(self, fill: Fill) -> None:
+        # 成交当时就记下入场时间（和成交一起落盘），不等下一根 bar
+        if self.ctx.position(self.p.symbol).qty != 0:
+            self.ctx.state.setdefault("entered_ns", self.ctx.now())
 
     def on_bar(self, bar: Bar) -> None:
         p = self.p

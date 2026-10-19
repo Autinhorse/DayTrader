@@ -238,3 +238,28 @@ def test_flatten_waits_for_cancel_confirmation():
     closes = [x for x in m.orders.values() if x.intent.reason.code == "eod_flatten"]
     assert closes == []  # 持仓已经是 0：不发平仓单，不会打成反向
     assert m.flatten_pending() == []
+
+
+def test_strategy_close_waits_for_cancels_and_is_an_exit():
+    """策略平仓（2026-10-19 模拟账户）：保护单还在撤销途中时，平仓单曾被当成开仓单等待人工确认，
+    而且不等撤单确认就要卖出。现在：等撤单确认后发出，按减仓单处理，不需要确认。"""
+    m, venue, _ = setup(confirm_sources={"s"})
+    entry = buy(m, qty=1, otype="MKT", limit_price=None)
+    m.confirm(entry.client_order_id, NOW)
+    m.handle([fill(entry.client_order_id, 1, "100", "e1")])
+    stop = m.submit(
+        OrderIntent(
+            source="s", symbol="X", side="SELL", qty=1, order_type="STP",
+            stop_price=D("95"), reason=Reason("stop"),
+        ),
+        NOW, exit_order=True,
+    )  # fmt: skip
+    why = Reason("time_exit", context={"close": 100.0})
+    assert m.close(NOW, "X", why) is None  # 还在等撤单确认
+    assert ("cancel", stop.client_order_id) in venue.sent
+    assert [o for o in m.orders.values() if o.intent.reason == why] == []
+    m.handle([Cancelled(stop.client_order_id, NOW)])
+    (close,) = [o for o in m.orders.values() if o.intent.reason == why]
+    assert close.status == OrderStatus.SUBMITTED  # 不是 AWAITING_CONFIRM
+    assert (close.intent.side, close.intent.qty, close.intent.order_type) == ("SELL", 1, "MKT")
+    assert m.flatten_pending() == []

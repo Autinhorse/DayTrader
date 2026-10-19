@@ -115,7 +115,7 @@ class OrderManager:
     deferred: bool = False
     outbox: list[tuple[str, Order, OrderIntent | None, int]] = field(default_factory=list)
     id_provider: Callable[[str], str] | None = None
-    _flatten_pending: dict[str, tuple[str, bool]] = field(default_factory=dict)
+    _flatten_pending: dict[str, tuple[Reason, bool]] = field(default_factory=dict)
     # 人工暂停（实盘版）：被暂停的来源只能发减仓单；halt_all_new 对所有来源生效
     halted: set[str] = field(default_factory=set)
     halt_all_new: bool = False
@@ -603,25 +603,38 @@ class OrderManager:
         """
         if lock_day:
             self.session.flattening = True
+        reason = Reason(code, "人工全部平仓" if code == "manual_flatten" else "收盘前强制平仓")
         for sym in symbols:
-            self._flatten_pending[sym] = (code, outside_rth)
+            self._flatten_pending[sym] = (reason, outside_rth)
         for o in self.open_orders():
             if o.intent.symbol in symbols:
                 self.cancel(o.client_order_id, now)
         self._check_flatten(now)
 
+    def close(
+        self, now: int, symbol: str, reason: Reason, outside_rth: bool = False
+    ) -> Order | None:
+        """策略平掉一个标的：与 flatten 相同的顺序（撤单 → 等撤单确认 → 按实际持仓平仓），
+        平仓单按减仓单处理（不需要人工确认，除非 confirm_exits）。不停止新开仓。
+        撤单都已确认时立即发出并返回平仓单，否则返回 None，平仓单在撤单确认后发出。"""
+        self._flatten_pending[symbol] = (reason, outside_rth)
+        for o in self.open_orders(symbol):
+            self.cancel(o.client_order_id, now)
+        return self._check_flatten(now).get(symbol)
+
     def flatten_pending(self) -> list[str]:
         """已请求平仓、还在等撤单确认的标的。"""
         return list(self._flatten_pending)
 
-    def _check_flatten(self, now: int) -> None:
+    def _check_flatten(self, now: int) -> dict[str, Order]:
+        sent: dict[str, Order] = {}
         for sym in list(self._flatten_pending):
             if any(
-                o.intent.symbol == sym and o.intent.reason.code != self._flatten_pending[sym][0]
+                o.intent.symbol == sym and o.intent.reason != self._flatten_pending[sym][0]
                 for o in self.open_orders()
             ):
                 continue  # 还有撤单未确认
-            code, outside_rth = self._flatten_pending.pop(sym)
+            reason, outside_rth = self._flatten_pending.pop(sym)
             pos = self.portfolio.position(sym)
             if pos.qty == 0:
                 continue
@@ -639,11 +652,10 @@ class OrderManager:
                 order_type="LMT" if outside_rth else "MKT",
                 limit_price=limit,
                 outside_rth=outside_rth,
-                reason=Reason(
-                    code, "人工全部平仓" if code == "manual_flatten" else "收盘前强制平仓"
-                ),
+                reason=reason,
             )
-            self.submit(intent, now, exit_order=True)
+            sent[sym] = self.submit(intent, now, exit_order=True)
+        return sent
 
 
 def round_price(x: float | Decimal) -> Decimal:

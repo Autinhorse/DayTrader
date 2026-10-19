@@ -826,29 +826,20 @@ class EngineContext:
         self._e.oms.cancel(client_order_id, self._e.clock.now())
 
     def close_position(self, symbol: str, *, reason: Reason) -> str | None:
-        """平掉该标的全部持仓：先撤销该标的的挂单，再发市价单（盘前盘后发让价 1% 的限价单）。"""
+        """平掉该标的全部持仓：撤挂单，等撤单确认后发市价单（盘前盘后发让价 1% 的限价单）。
+
+        不等撤单确认就平仓，括号单的保护单可能同时成交，把持仓打成反向（DESIGN.md 8.4）。
+        撤单当场确认时返回平仓单号；否则返回 None，平仓单稍后发出。
+        """
         e = self._e
-        for o in e.oms.open_orders(symbol, e.cfg.strategy_id):
-            e.oms.cancel(o.client_order_id, e.clock.now())
-        pos = e.portfolio.position(symbol)
-        if pos.qty == 0:
+        self.log("平仓", symbol=symbol, reason=reason.code)
+        if e.portfolio.position(symbol).qty == 0:
+            for o in e.oms.open_orders(symbol, e.cfg.strategy_id):
+                e.oms.cancel(o.client_order_id, e.clock.now())
             return None
-        side = "SELL" if pos.qty > 0 else "BUY"
         regular = e.oms.session.session == "regular"
-        last = e.portfolio.last_price.get(symbol, float(pos.avg_cost))
-        return self._order(
-            side,
-            symbol,
-            abs(pos.qty),
-            reason,
-            "MKT" if regular else "LMT",
-            None if regular else last * (0.99 if side == "SELL" else 1.01),
-            None,
-            None,
-            None,
-            "DAY",
-            not regular,
-        )
+        order = e.oms.close(e.clock.now(), symbol, reason, outside_rth=not regular)
+        return None if order is None else order.client_order_id
 
     # 状态
     def position(self, symbol: str) -> Position:

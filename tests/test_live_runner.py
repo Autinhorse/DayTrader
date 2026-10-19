@@ -135,6 +135,9 @@ def test_local_paper_end_to_end_and_recovery(tmp_path: Path, dataset):
     orders = list(r.engine.oms.orders.values())  # type: ignore[union-attr]
     assert len(orders) == 1 and orders[0].status == OrderStatus.FILLED
     assert ib.tick_subs.keys() == {"AAA"} and ib.snap_subs.keys() == {"BBB"}
+    # 没有订单变化时策略状态也要落盘（2026-10-19：持仓计时只在内存里，重启后从头计时）
+    r.engine.ctx.state["held_since"] = 123  # type: ignore[union-attr]
+    drive(r, ib, clock, ny_to_ns(DAY, time(10, 33, 5)))
     r.close()
     # 重启恢复：持仓、订单、策略状态都从日志读回，策略仍是暂停
     clock2 = Clock(clock.t + 60 * S)
@@ -142,7 +145,8 @@ def test_local_paper_end_to_end_and_recovery(tmp_path: Path, dataset):
     r2 = make_runner(tmp_path, clock2, ib2)
     asyncio.run(r2.startup())
     assert r2.positions() == {"AAA": 10}
-    assert r2.engine.cfg.initial_state == {"entered": True}  # type: ignore[union-attr]
+    # 恢复的状态要真正交给策略（2026-10-19 之前只写进了 cfg，ctx.state 是空的）
+    assert r2.engine.ctx.state.snapshot() == {"entered": True, "held_since": 123}  # type: ignore[union-attr]
     assert any(a.kind == "recover" for a in r2.alerts)
     assert r2.strategy_running is False
     r2.close()

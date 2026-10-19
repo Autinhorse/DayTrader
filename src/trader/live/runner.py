@@ -48,7 +48,7 @@ from trader.live.release import GitState, release_problems
 from trader.oms.journal import Journal, recover_into
 from trader.oms.manager import Notice
 from trader.oms.orders import QueryResult
-from trader.strategy.base import Strategy, get_strategy, source_hash
+from trader.strategy.base import Strategy, StrategyState, get_strategy, source_hash
 
 LOOP_MS = 100
 
@@ -83,6 +83,7 @@ class LiveRunner:
     on_alert: Callable[[Alert], None] | None = None
     _changed: set[str] = field(default_factory=set)
     _fills_saved: int = 0
+    _state_saved: dict[str, Any] | None = None  # 最近一次落盘的策略状态
     _comm_saved: int = 0
     _stop: bool = False
     _reconnecting: bool = False
@@ -244,12 +245,15 @@ class LiveRunner:
             else:
                 # 本地模拟撮合不保存挂单：恢复后查询结果都是“没有这张订单”
                 e.oms.handle([QueryResult(c, start, found=False) for c in to_query])
-            e.cfg.initial_state = rec.states.get(self.strategy_id, {})
             self._alert(
                 start, "recover", f"从日志恢复 {len(rec.orders)} 张订单，持仓 {self.positions()}"
             )
             self._fills_saved = len(e.oms.fills)
             self._comm_saved = len(e.oms.commission_log)
+        # 引擎已经 start，ctx.state 要直接替换（只改 cfg.initial_state 不会生效）
+        e.cfg.initial_state = rec.states.get(self.strategy_id, {})
+        e.ctx.state_obj = StrategyState(e.cfg.initial_state)
+        self._state_saved = e.ctx.state_obj.snapshot()
         if self.cfg.strategy is not None:
             self.strategy_cls = get_strategy(self.cfg.strategy.name)
             mode = "人工确认开仓" if cfg.execution == "confirm" else "自动执行"
@@ -641,13 +645,15 @@ class LiveRunner:
         changed = self._changed | {o.client_order_id for _, o, _, _ in oms.outbox}
         new_fills = oms.fills[self._fills_saved :]
         new_comm: list[CommissionUpdate] = oms.commission_log[self._comm_saved :]
-        if changed or new_fills or new_comm:
+        # 策略状态变了就落盘，即使这一步没有订单变化（例如只记下了入场时间）
+        state = e.ctx.state_obj.snapshot() if self.strategy_running else None
+        states = None if state is None or state == self._state_saved else {self.strategy_id: state}
+        if changed or new_fills or new_comm or states:
             orders: list[Order] = [oms.orders[c] for c in changed if c in oms.orders]
-            states = (
-                {self.strategy_id: e.ctx.state_obj.snapshot()} if self.strategy_running else None
-            )
             j.commit(now, orders=orders, fills=new_fills, commissions=new_comm, owners=oms.owners,
                      states=states)  # fmt: skip
+            if states:
+                self._state_saved = state
             self._changed.clear()
             self._fills_saved += len(new_fills)
             self._comm_saved += len(new_comm)

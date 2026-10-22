@@ -849,6 +849,14 @@ Notebook 接口是补充手段，用于界面没有覆盖的自由分析；日�
 
 研究工具，不属于开发阶段。输入一组证券和日期范围，只用常规时段计算每日的幅度、形态、路程、摆动（ZigZag，阈值为 ADR 倍数，ADR 是常规时段振幅的中位数，不含隔夜跳空）指标；计算前删除坏数据时段、修正离群成交（只用于本报表，原始数据不变），按证券汇总，在本批证券中做百分位打分：主排序是可交易性评分（可获取波动均值、转化效率、每日转化效率中位数），综合得分（活跃度、震荡度、摆动价值、稳定性）作参考；可以把几个区间合成一个样本。打分只统计开盘 5 分钟以后开始的摆动，另给剔除开盘 0/5/15/30/90 分钟的排名对照。另外标记数据异常日和行为特殊日并出核对图；杠杆 ETF 与标的对照、扩展时段（跳空拆解、盘前振幅）、阈值敏感性、多区间对比只作参考。价格按拆股复权到区间末日。规范：`docs/intraday_volatility_report_spec.md`；代码 `trader.analytics`（`build_report(tickers, start, end, params)`）；notebook `user/notebooks/日内波动报表.ipynb`。
 
+### 10.9 Volume Profile（决策 0017）
+
+研究工具。按价格统计成交量分布，提取 POC、价值区（VAH / VAL）、HVN / LVN 和形态指标；时间窗口有前一日、
+当天滚动（developing）、N 日复合、按半衰期衰减、锚定、盘前、盘后。默认用清洗后的 1 秒 bar，每日细网格（$0.01）缓存在
+`data/profiles/`。交易日 T 的价位只用 T−1 及之前的完整交易日，当天部分只用当时之前已收盘的 bar，价格为 T 当天的实际价格。
+纯计算在 `trader.core.volume_profile`（以后的图表指标和策略共用），读数据和时间窗口在 `trader.analytics.volume_profile`。
+规范：`docs/volume_profile_spec.md`；notebook `user/notebooks/Volume Profile.ipynb`；命令行 `trader profile levels|developing|build`。
+
 ### 10.7 研究工作流界面
 
 这是第一批交付的核心：不写脚本、不敲命令，就能完成一次完整的研究循环。

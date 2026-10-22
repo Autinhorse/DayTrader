@@ -12,6 +12,9 @@
     trader backtest run config/backtests/ema_cross_spy.yaml
     trader backtest list                        最近的回测
     trader indicators compute --symbol SPY --timeframe 5m --name ema --params period=20 --date D
+    trader profile levels --symbol NVDA --date 2026-10-15     开盘前可用的 Volume Profile 关键价位
+    trader profile developing --symbol NVDA --date 2026-10-15 [--step 30]   当天 dPOC / dVAH / dVAL
+    trader profile build [--symbols ...] --start 2026-07-01 [--end ...]     预先计算每日细网格缓存
 
 不带 --symbols 时使用 config/universe.yaml 里的全部标的。
 """
@@ -342,6 +345,70 @@ def cmd_backtest_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _fmt_px(x: object) -> str:
+    if isinstance(x, list):
+        return ", ".join(f"{v:.2f}" for v in x) or "-"
+    return f"{x:.2f}" if isinstance(x, float) else str(x)
+
+
+def cmd_profile_levels(args: argparse.Namespace) -> int:
+    from trader.analytics.volume_profile import VolumeProfile
+
+    v = VolumeProfile()
+    sym, day = args.symbol.upper(), date.fromisoformat(args.date)
+    adr = v.adr(sym, day)
+    print(f"{sym} {day} 开盘前可用的 Volume Profile（当天价格口径）")
+    print(f"ADR {adr:.2f}  前一日收盘 {v.prev_close(sym, day):.2f}")
+    print(f"{'类型':<22}{'POC':>9}{'VAH':>9}{'VAL':>9}{'格子':>6}{'天数':>5}  HVN / LVN")
+    for kind, kw in v.default_windows():
+        r = v.get_levels(sym, day, kind, **kw)
+        label = kind + ("" if not kw else " " + ",".join(f"{k}={x}" for k, x in kw.items()))
+        print(
+            f"{label:<24}{_fmt_px(r['poc']):>9}{_fmt_px(r['vah']):>9}{_fmt_px(r['val']):>9}"
+            f"{r['bin_size']:>6.2f}{r['n_days']:>5}  {_fmt_px(r['hvn'])} / {_fmt_px(r['lvn'])}"
+        )
+    naked = v.naked_at(sym, day)
+    print(f"\n过去 {v.p.naked_lookback} 个交易日尚未回测的 POC：")
+    if not naked.empty:
+        for d, px in zip(naked["poc_date"], naked["poc_now"], strict=True):
+            print(f"  {d}  {px:.2f}")
+    return 0
+
+
+def cmd_profile_developing(args: argparse.Namespace) -> int:
+    from trader.analytics.volume_profile import VolumeProfile
+
+    v = VolumeProfile()
+    dev = v.get_developing(args.symbol, args.date, until=args.until)
+    if dev.empty:
+        print("没有数据")
+        return 1
+    for r in dev.iloc[args.step - 1 :: args.step].itertuples():
+        mark = "" if r.stable else "  （不稳定）"
+        print(
+            f"{r.time:%H:%M}  dPOC {r.dpoc:9.2f}  dVAH {r.dvah:9.2f}  dVAL {r.dval:9.2f}"
+            f"  累计成交量 {r.cum_volume:>14,.0f}{mark}"
+        )
+    return 0
+
+
+def cmd_profile_build(args: argparse.Namespace) -> int:
+    from trader.analytics.volume_profile import VolumeProfile
+
+    clock = WallClock(lambda _e: None)
+    v = VolumeProfile()
+    start = date.fromisoformat(args.start)
+    end = date.fromisoformat(args.end) if args.end else ny_date(clock.now())
+    for sym in _symbols(args.symbols):
+        t0 = clock.now()
+        tds = v.store.days_between(sym, start, end)
+        for td in tds:
+            v.store.day(sym, td)
+        print(f"{sym}: {len(tds)} 天，{(clock.now() - t0) / 1e9:.1f} 秒")
+    print(f"缓存目录 {v.store.root}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="trader", description="交易系统命令行（研究版）")
     sub = p.add_subparsers(dest="group", required=True)
@@ -415,6 +482,25 @@ def build_parser() -> argparse.ArgumentParser:
     bl = bt.add_parser("list", help="最近的回测")
     bl.add_argument("--limit", type=int, default=20)
     bl.set_defaults(func=cmd_backtest_list)
+
+    pf = sub.add_parser("profile", help="Volume Profile（决策 0017）").add_subparsers(
+        dest="cmd", required=True
+    )
+    pl_ = pf.add_parser("levels", help="某天开盘前可用的关键价位")
+    pl_.add_argument("--symbol", required=True)
+    pl_.add_argument("--date", required=True)
+    pl_.set_defaults(func=cmd_profile_levels)
+    pd_ = pf.add_parser("developing", help="当天的 dPOC / dVAH / dVAL")
+    pd_.add_argument("--symbol", required=True)
+    pd_.add_argument("--date", required=True)
+    pd_.add_argument("--until", help="纽约时间，例如 11:00；默认收盘")
+    pd_.add_argument("--step", type=int, default=15, help="每隔几分钟显示一行")
+    pd_.set_defaults(func=cmd_profile_developing)
+    pb = pf.add_parser("build", help="预先计算每日细网格缓存")
+    pb.add_argument("--symbols")
+    pb.add_argument("--start", required=True)
+    pb.add_argument("--end")
+    pb.set_defaults(func=cmd_profile_build)
     return p
 
 

@@ -84,28 +84,51 @@ def _rolling_median(x: np.ndarray, half: int) -> np.ndarray:
     return out
 
 
-def clean_fine(fine: Bars, limit: float, half: int = 30) -> tuple[Bars, int]:
-    """修正离群的 1 秒 bar。返回 (清洗后的 bar, 被修正或删除的 bar 数)。"""
+def prefix_median(close: np.ndarray, med_full: np.ndarray, n: int, half: int = 30) -> np.ndarray:
+    """只有前 n 根 bar 时的滚动中位数（等于 _rolling_median(close[:n])），复用整段的结果 med_full：
+    前 n − half 根的窗口都在前 n 根以内，与整段相同；只重算最后 half 根（截断窗口）。"""
+    if n <= 4 * half + 2:
+        return _rolling_median(close[:n], half)
+    out = med_full[:n].copy()
+    for i in range(half):
+        out[n - 1 - i] = np.median(close[n - 1 - 2 * i : n])
+    return out
+
+
+def fix_prints(fine: Bars, med: np.ndarray, limit: float) -> tuple[Bars, np.ndarray, np.ndarray]:
+    """按给定的中位数修正离群价格。
+
+    返回 (修正后的 bar（与输入逐根对应）, 保留的掩码, 被改动的掩码)。"""
     n = len(fine)
     if n == 0 or not np.isfinite(limit) or limit <= 0:
-        return fine, 0
-    med = _rolling_median(fine.close, half)
+        return fine, np.ones(n, dtype=bool), np.zeros(n, dtype=bool)
 
     def ok(x: np.ndarray) -> np.ndarray:
         return np.abs(x - med) <= limit
 
     ok_o, ok_h, ok_l, ok_c = ok(fine.open), ok(fine.high), ok(fine.low), ok(fine.close)
-    keep = ok_o | ok_c
     o = np.where(ok_o, fine.open, fine.close)
     c = np.where(ok_c, fine.close, fine.open)
     h = np.where(ok_h, fine.high, np.maximum(o, c))
     lo = np.where(ok_l, fine.low, np.minimum(o, c))
-    changed = ~(ok_o & ok_h & ok_l & ok_c)
-    out = Bars(
-        ts=fine.ts[keep], open=o[keep], high=h[keep], low=lo[keep], close=c[keep],
-        volume=fine.volume[keep], vwap=fine.vwap[keep],
+    out = Bars(fine.ts, o, h, lo, c, fine.volume, fine.vwap)
+    return out, ok_o | ok_c, ~(ok_o & ok_h & ok_l & ok_c)
+
+
+def select(b: Bars, mask: np.ndarray | slice) -> Bars:
+    return Bars(
+        b.ts[mask], b.open[mask], b.high[mask], b.low[mask], b.close[mask],
+        b.volume[mask], b.vwap[mask],
     )  # fmt: skip
-    return out, int(changed.sum())
+
+
+def clean_fine(fine: Bars, limit: float, half: int = 30) -> tuple[Bars, int]:
+    """修正离群的 1 秒 bar。返回 (清洗后的 bar, 被修正或删除的 bar 数)。"""
+    n = len(fine)
+    if n == 0 or not np.isfinite(limit) or limit <= 0:
+        return fine, 0
+    out, keep, changed = fix_prints(fine, _rolling_median(fine.close, half), limit)
+    return select(out, keep), int(changed.sum())
 
 
 def drop_windows(b: Bars, windows: list[tuple[int, int]], bar_ns: int) -> tuple[Bars, int]:

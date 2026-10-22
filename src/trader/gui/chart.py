@@ -60,6 +60,8 @@ class ChartView(QWebEngineView):
         self._pending: list[str] = []
         self.bridge.ready_signal.connect(self._on_ready)
         self.page().setBackgroundColor(Qt.GlobalColor.black)
+        # 右键由页面处理（弹出 K 线信息），不显示浏览器菜单
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
         self.setUrl(QUrl.fromLocalFile(str(ASSETS / "chart.html")))
 
     def _on_ready(self) -> None:
@@ -115,6 +117,11 @@ class ChartWidget(QWidget):
         self.link.setToolTip("勾选后，在回测结果里点击交易时这个图表会跳过去")
         self.link.setChecked(cfg.get("linked", True))
         clear_btn = QPushButton("清除标记")
+        self.data_win = QCheckBox("数据窗口")
+        self.data_win.setToolTip(
+            "右侧显示鼠标所在 K 线的价格和全部指标数值；双击或右键 K 线弹出详细信息"
+        )
+        self.data_win.setChecked(cfg.get("data_window", True))
         bar = QHBoxLayout()
         for w in (
             self.sym_box,
@@ -125,6 +132,7 @@ class ChartWidget(QWidget):
             ind_btn,
             self.link,
             clear_btn,
+            self.data_win,
         ):
             bar.addWidget(w)
         bar.addStretch()
@@ -147,6 +155,8 @@ class ChartWidget(QWidget):
         go.clicked.connect(lambda: self.load(self.date_box.date().toPython()))  # type: ignore[arg-type]
         ind_btn.clicked.connect(self._edit_indicators)
         clear_btn.clicked.connect(self.clear_overlay)
+        self.data_win.toggled.connect(lambda on: self.view.call("setDataWindow", on))
+        self.view.call("setDataWindow", self.data_win.isChecked())
         self.view.bridge.more_signal.connect(self.load_more)
         self.load(None)
 
@@ -158,9 +168,11 @@ class ChartWidget(QWidget):
             "timeframe": self.timeframe,
             "session": self.session,
             "indicators": [
-                {"name": i.name, "params": i.params, "color": i.color} for i in self.indicators
+                {"name": i.name, "params": i.params, "color": i.color, "last_day": i.last_day}
+                for i in self.indicators
             ],
             "linked": self.link.isChecked(),
+            "data_window": self.data_win.isChecked(),
         }
 
     def title(self) -> str:

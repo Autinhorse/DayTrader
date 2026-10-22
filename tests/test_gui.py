@@ -172,6 +172,32 @@ def test_chart_payload(ds_with_runs):
     assert markers and markers[0]["shape"] == "arrowUp"
 
 
+def test_indicator_labels_last_day_and_colors(ds_with_runs):
+    """标签只列非默认参数；“今日”只保留最后一个交易日；自选颜色用于全部水平线。"""
+    from trader.gui.services import IndicatorSpec, Services, ny_seconds
+
+    assert IndicatorSpec("vp_levels", {"days": 1, "value_area_pct": 0.7}).label == "vp_levels"
+    assert IndicatorSpec("vp_levels", {"days": 5}, last_day=True).label == (
+        "vp_levels(days=5) · 今日"
+    )
+    assert IndicatorSpec("ema", {"period": 5}).label == "ema(period=5)"
+    ds, _ = ds_with_runs
+    sv = Services(ds.root, ds.root)
+    days = sv.window_days("AAA", "5m", date(2026, 1, 6))
+    specs = [
+        IndicatorSpec("prev_day", {}, color="#123456", last_day=True),
+        IndicatorSpec("bollinger", {}, color="#654321"),
+    ]
+    p = sv.chart_payload("AAA", "5m", "rth", days, specs)
+    first = days[-1].open
+    prev = p["indicators"][0]["outputs"]
+    assert all(d["time"] >= ny_seconds(first) for o in prev for d in o["data"])
+    assert len(prev[0]["data"]) == 78
+    assert {o["color"] for o in prev} == {"#123456"}  # 水平线全部用自选颜色
+    boll = p["indicators"][1]["outputs"]
+    assert boll[0]["color"] == "#654321" and boll[1]["color"] != "#654321"
+
+
 # ---------- 主窗口冒烟测试 ----------
 
 

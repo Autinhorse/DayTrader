@@ -58,11 +58,44 @@ class IndicatorSpec:
     name: str
     params: dict[str, Any]
     color: str | None = None
+    last_day: bool = False  # 只显示图上最后一个交易日（回放中是回放当天）
 
     @property
     def label(self) -> str:
-        p = ",".join(str(v) for v in self.params.values())
-        return f"{self.name}({p})" if p else self.name
+        """名字加上与默认值不同的参数，例如 vp_levels(days=5)。"""
+        try:
+            fields = get_indicator(self.name).Params.model_fields
+            shown = {k: v for k, v in self.params.items() if k not in fields or
+                     fields[k].default != v}  # fmt: skip
+        except KeyError:
+            shown = self.params
+        p = ", ".join(f"{k}={v}" for k, v in shown.items())
+        text = f"{self.name}({p})" if p else self.name
+        return text + (" · 今日" if self.last_day else "")
+
+
+def indicator_series(spec: IndicatorSpec, df: pl.DataFrame, since: int | None) -> dict[str, Any]:
+    """指标计算结果 → 图表数据。since（UTC 纳秒）：只保留 ts_start 不早于它的点。"""
+    cls = get_indicator(spec.name)
+    if since is not None:
+        df = df.filter(pl.col("ts_start") >= since)
+    t = [ny_seconds(x) for x in df["ts_start"].to_list()]
+    outs = []
+    for i, o in enumerate(cls.outputs):
+        data = [
+            {"time": tt, "value": vv}
+            for tt, vv in zip(t, df[o.key].to_list(), strict=True)
+            if vv is not None
+        ]
+        if cls.scope == "session":
+            break_between_days(data, step=o.plot == "hline")
+        # 自选颜色：水平线类（hline、band）全部用它，其他只用于第一条输出
+        own = spec.color if spec.color and (i == 0 or o.plot in ("hline", "band")) else None
+        outs.append(
+            {"key": o.key, "plot": o.plot, "pane": o.pane, "color": own or o.color,
+             "dashed": o.dashed, "data": data}
+        )  # fmt: skip
+    return {"label": spec.label, "outputs": outs}
 
 
 class Services:
@@ -152,29 +185,7 @@ class Services:
             except Exception as e:  # 指标出错不影响图表其他部分
                 inds.append({"label": f"{spec.label} 出错：{e}", "outputs": []})
                 continue
-            cls = get_indicator(spec.name)
-            t = [ny_seconds(x) for x in df["ts_start"].to_list()]
-            outs = []
-            for i, o_spec in enumerate(cls.outputs):
-                vals = df[o_spec.key].to_list()
-                data = [
-                    {"time": tt, "value": vv}
-                    for tt, vv in zip(t, vals, strict=True)
-                    if vv is not None
-                ]
-                if cls.scope == "session":
-                    break_between_days(data, step=o_spec.plot == "hline")
-                color = (spec.color if i == 0 and spec.color else None) or o_spec.color
-                outs.append(
-                    {
-                        "key": o_spec.key,
-                        "plot": o_spec.plot,
-                        "pane": o_spec.pane,
-                        "color": color,
-                        "data": data,
-                    }
-                )
-            inds.append({"label": spec.label, "outputs": outs})
+            inds.append(indicator_series(spec, df, days[-1].start if spec.last_day else None))
         last = c[-1] if c else 1.0
         return {
             "candles": candles,

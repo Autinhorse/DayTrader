@@ -47,6 +47,7 @@ class OutputSpec:
     plot: Literal["line", "histogram", "band", "marker", "hline"]
     pane: Literal["price", "separate"]  # 叠加在主图，或单独窗格
     color: str | None = None
+    dashed: bool = False  # 虚线（line / hline）
 
 
 @dataclass(frozen=True, slots=True)

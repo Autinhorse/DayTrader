@@ -36,7 +36,7 @@ from trader.core.models import Bar
 from trader.core.timeutil import NS_PER_MS, from_ns, ny_to_ns
 from trader.gui.chart import ChartWidget
 from trader.gui.forms import ModelForm
-from trader.gui.services import Services, break_between_days, ny_seconds, today
+from trader.gui.services import Services, indicator_series, ny_seconds, today
 from trader.gui.tables import FrameTable
 from trader.strategy.base import get_strategy
 
@@ -129,28 +129,11 @@ class ReplayChart(ChartWidget):
         inds = []
         self._handles = []
         self._sent_ind = []
-        from trader.indicators.base import get_indicator
-
         for spec in self.indicators:
             df = rs.indicator_values(
                 self.symbol, self.timeframe, spec.name, spec.params, self.lookback
             )
-            cls = get_indicator(spec.name)
-            t = [ny_seconds(x) for x in df["ts_start"].to_list()]
-            outs = []
-            for k, o in enumerate(cls.outputs):
-                data = [
-                    {"time": a, "value": b}
-                    for a, b in zip(t, df[o.key].to_list(), strict=True)
-                    if b is not None
-                ]
-                if cls.scope == "session":
-                    break_between_days(data, step=o.plot == "hline")
-                color = (spec.color if k == 0 and spec.color else None) or o.color
-                outs.append(
-                    {"key": o.key, "plot": o.plot, "pane": o.pane, "color": color, "data": data}
-                )
-            inds.append({"label": spec.label, "outputs": outs})
+            inds.append(indicator_series(spec, df, rs.day_start if spec.last_day else None))
             h = rs.watch_indicator(self.symbol, self.timeframe, spec.name, spec.params)
             self._handles.append(h)
             self._sent_ind.append(len(h.values))

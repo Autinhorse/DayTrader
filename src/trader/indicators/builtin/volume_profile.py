@@ -142,8 +142,8 @@ class VolumeProfileLevels(_ProfileBase):
     Params = LevelsParams
     outputs = [
         OutputSpec("poc", "hline", "price", "#d62728"),
-        OutputSpec("vah", "hline", "price", "#1f77b4"),
-        OutputSpec("val", "hline", "price", "#1f77b4"),
+        OutputSpec("vah", "hline", "price", "#1f77b4", dashed=True),
+        OutputSpec("val", "hline", "price", "#1f77b4", dashed=True),
     ]
 
     def __init__(self, params: LevelsParams) -> None:
@@ -172,8 +172,8 @@ class VolumeProfileDeveloping(_ProfileBase):
     Params = DevelopingParams
     outputs = [
         OutputSpec("dpoc", "line", "price", "#ff7f0e"),
-        OutputSpec("dvah", "line", "price", "#2ca02c"),
-        OutputSpec("dval", "line", "price", "#2ca02c"),
+        OutputSpec("dvah", "line", "price", "#2ca02c", dashed=True),
+        OutputSpec("dval", "line", "price", "#2ca02c", dashed=True),
     ]
 
     def update(self, bar: Bar) -> dict[str, float | None]:

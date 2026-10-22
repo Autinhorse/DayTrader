@@ -1,4 +1,5 @@
-"""图表的指标对话框：从目录添加指标（参数表单由参数模型自动生成）、调整颜色、移除。
+"""图表的指标对话框：从目录添加指标（参数表单由参数模型自动生成）、调整颜色、移除、
+设为只显示最后一个交易日（今日）。
 
 目录包含内置指标和 user/indicators/ 下的自定义指标；“重新加载自定义指标”会重新读取文件（热加载）。
 """
@@ -7,6 +8,7 @@ from __future__ import annotations
 
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
+    QCheckBox,
     QColorDialog,
     QDialog,
     QDialogButtonBox,
@@ -23,6 +25,9 @@ from PySide6.QtWidgets import (
 from trader.gui.forms import ModelForm
 from trader.gui.services import IndicatorSpec, Services
 
+# 同一个指标加多次时依次使用的颜色
+SPARE_COLORS = ("#e91e63", "#9c27b0", "#00bcd4", "#ffeb3b", "#8bc34a", "#ff9800", "#795548")
+
 
 class IndicatorDialog(QDialog):
     def __init__(self, sv: Services, current: list[IndicatorSpec], parent: QWidget | None = None):
@@ -38,6 +43,8 @@ class IndicatorDialog(QDialog):
         self.form_holder = QVBoxLayout()
         self.form: ModelForm | None = None
         add = QPushButton("添加 →")
+        self.last_day = QCheckBox("只显示最后一个交易日（今日）")
+        self.last_day.setToolTip("例如前一日、5 日、15 日的价位只画在今天，便于对比")
         reload_btn = QPushButton("重新加载自定义指标")
         left = QVBoxLayout()
         left.addWidget(QLabel("指标目录（内置 + user/indicators/）"))
@@ -47,16 +54,19 @@ class IndicatorDialog(QDialog):
         mid.addWidget(self.desc)
         mid.addLayout(self.form_holder)
         mid.addStretch()
+        mid.addWidget(self.last_day)
         mid.addWidget(add)
 
         self.current = QListWidget()
         color = QPushButton("颜色…")
+        today_btn = QPushButton("今日 开/关")
         remove = QPushButton("移除")
         right = QVBoxLayout()
         right.addWidget(QLabel("图上的指标"))
         right.addWidget(self.current, 1)
         row = QHBoxLayout()
         row.addWidget(color)
+        row.addWidget(today_btn)
         row.addWidget(remove)
         right.addLayout(row)
 
@@ -77,6 +87,7 @@ class IndicatorDialog(QDialog):
         add.clicked.connect(self._add)
         remove.clicked.connect(self._remove)
         color.clicked.connect(self._color)
+        today_btn.clicked.connect(self._toggle_last_day)
         reload_btn.clicked.connect(self._reload)
         self._fill_catalog()
         self._fill_current()
@@ -124,7 +135,14 @@ class IndicatorDialog(QDialog):
         except ValueError as e:
             QMessageBox.warning(self, "参数有误", str(e))
             return
-        self.specs.append(IndicatorSpec(item.data(256), params))
+        name = item.data(256)
+        color = None
+        if any(s.name == name for s in self.specs):  # 同一指标加第二个：自动换一种颜色以便区分
+            used = {s.color for s in self.specs}
+            color = next((c for c in SPARE_COLORS if c not in used), None)
+        self.specs.append(
+            IndicatorSpec(name, params, color=color, last_day=self.last_day.isChecked())
+        )
         self._fill_current()
 
     def _remove(self) -> None:
@@ -141,6 +159,13 @@ class IndicatorDialog(QDialog):
         if c.isValid():
             self.specs[row].color = c.name()
             self._fill_current()
+
+    def _toggle_last_day(self) -> None:
+        row = self.current.currentRow()
+        if 0 <= row < len(self.specs):
+            self.specs[row].last_day = not self.specs[row].last_day
+            self._fill_current()
+            self.current.setCurrentRow(row)
 
     def _reload(self) -> None:
         errors = self.sv.reload_user_code()

@@ -4,6 +4,9 @@
 预热起点取三项要求中最早的：固定根数、当前交易日开始、之前 N 个完整交易日。
 因此从盘中任意时刻开始计算，日内 VWAP 仍从当天开盘算起，前一日高低收仍取自上一个完整交易日，
 与从更早时刻开始计算在同一时刻的数值相同。
+
+细粒度输入的指标（input_timeframe，决策 0018）：同时读输入周期的 bar，按时间顺序先 ingest
+收盘时刻不晚于显示 bar 收盘时刻的细 bar，再 update 显示 bar。
 """
 
 from __future__ import annotations
@@ -11,13 +14,14 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping
 from typing import Any
 
+import numpy as np
 import polars as pl
 
 from trader.core.models import Bar
 from trader.core.timeutil import NS_PER_DAY
 from trader.core.trading_calendar import SessionFilter, TradingDay
 from trader.data.history import HistoryService
-from trader.indicators.base import Indicator, create
+from trader.indicators.base import BarBatch, Indicator, create
 
 # 为凑够预热根数最多往前找这么多个交易日
 MAX_LOOKBACK_DAYS = 400
@@ -41,7 +45,11 @@ class IndicatorService:
         ind = create(name, **params)
         out_keys = [o.key for o in ind.outputs]
         rows: list[list[Any]] = []
-        for bar in self._bars(symbol, timeframe, ind, start, end, session):
+        for bar, display in self._bars(symbol, timeframe, ind, start, end, session):
+            if not display:
+                ind.ingest_batch(bar)  # type: ignore[arg-type]
+                continue
+            assert isinstance(bar, Bar)
             values = ind.update(bar)
             if bar.ts_start >= start:
                 rows.append([bar.ts_start, bar.ts_end, *(values.get(k) for k in out_keys)])
@@ -55,11 +63,19 @@ class IndicatorService:
 
         与 compute 用同样的取数规则，所以预热后的实例与历史计算在 upto 之后的数值相同。
         """
-        return [
-            ind.update(bar)
-            for bar in self._bars(symbol, timeframe, ind, upto, upto, session)
-            if bar.ts_end <= upto
-        ]
+        out = []
+        for item, display in self._bars(symbol, timeframe, ind, upto, upto, session):
+            if display:
+                assert isinstance(item, Bar)
+                if item.ts_end <= upto:
+                    out.append(ind.update(item))
+                continue
+            assert isinstance(item, BarBatch)
+            # 正在形成的显示 bar 里已收盘的细 bar 也要喂入
+            n = int(np.searchsorted(item.ts_end, upto, side="right"))
+            if n:
+                ind.ingest_batch(item.slice(0, n))
+        return out
 
     def _bars(
         self,
@@ -69,32 +85,61 @@ class IndicatorService:
         start: int,
         end: int,
         session: SessionFilter,
-    ) -> Iterator[Bar]:
-        """按预热需求从更早的交易日起逐根产生 bar（ts_start < end）。
+    ) -> Iterator[tuple[Bar | BarBatch, bool]]:
+        """按预热需求从更早的交易日起逐根产生 (bar, True)，ts_start < end。
 
-        会话指标在每个交易日开始时重置。
+        会话指标在每个交易日开始时重置。细粒度输入的指标在每根显示 bar 之前插入
+        (收盘不晚于它的输入周期 bar 的 BarBatch, False)。
         """
+        fine_tf = ind.input_timeframe
         for day in self._days_with_warmup(symbol, timeframe, ind, start, end, session):
             if ind.scope == "session":
                 ind.on_session_open(day)
-            df = self.history.day_bars(symbol, timeframe, day, session)
-            for r in df.iter_rows(named=True):
-                if r["ts_start"] >= end:
-                    return
-                yield Bar(
-                    symbol,
-                    timeframe,
-                    r["ts_start"],
-                    r["open"],
-                    r["high"],
-                    r["low"],
-                    r["close"],
-                    r["volume"],
-                    r["vwap"],
-                    r["trades"],
-                    r["session"],
-                    r["ts_end"],
-                )
+            shown = self._day(symbol, timeframe, day, session, end)
+            if fine_tf is None:
+                yield from ((b, True) for b in shown)
+                continue
+            fine = self._batch(symbol, fine_tf, day, session, end)
+            cuts = np.searchsorted(fine.ts_end, [b.ts_end for b in shown], side="right")
+            i = 0
+            for b, j in zip(shown, cuts, strict=True):
+                if j > i:
+                    yield fine.slice(i, int(j)), False
+                    i = int(j)
+                yield b, True
+            if i < len(fine):
+                yield fine.slice(i, len(fine)), False
+
+    def _frame(
+        self, symbol: str, timeframe: str, day: TradingDay, session: SessionFilter, end: int
+    ) -> pl.DataFrame:
+        df = self.history.day_bars(symbol, timeframe, day, session)
+        return df.filter(df["ts_start"] < end)
+
+    def _day(
+        self, symbol: str, timeframe: str, day: TradingDay, session: SessionFilter, end: int
+    ) -> list[Bar]:
+        df = self._frame(symbol, timeframe, day, session, end)
+        return [
+            Bar(symbol, timeframe, *r)
+            for r in df.select(
+                "ts_start", "open", "high", "low", "close", "volume", "vwap", "trades",
+                "session", "ts_end",
+            ).iter_rows()
+        ]  # fmt: skip
+
+    def _batch(
+        self, symbol: str, timeframe: str, day: TradingDay, session: SessionFilter, end: int
+    ) -> BarBatch:
+        df = self._frame(symbol, timeframe, day, session, end)
+
+        def col(name: str, dtype: Any = np.float64) -> np.ndarray:
+            return df[name].fill_null(float("nan")).to_numpy().astype(dtype)
+
+        return BarBatch(
+            symbol, timeframe, col("ts_start", np.int64), col("ts_end", np.int64), col("open"),
+            col("high"), col("low"), col("close"), col("volume"), col("vwap"),
+        )  # fmt: skip
 
     def _days_with_warmup(
         self,

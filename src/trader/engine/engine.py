@@ -196,6 +196,7 @@ class BacktestEngine:
         self._notices: deque[Notice] = deque()
         self._aggs: dict[tuple[str, str], BarAggregator] = {}
         self._handles: dict[tuple[str, str], list[ActiveIndicator]] = {}
+        self._feeds: dict[tuple[str, str], list[ActiveIndicator]] = {}  # 细粒度输入的指标
         self._bars: dict[tuple[str, str], deque[Bar]] = {}
         self._subs: set[tuple[str, str]] = set()
         self._strategy_subs: set[tuple[str, str]] = set()
@@ -279,9 +280,14 @@ class BacktestEngine:
         """
         self.subscribe(symbol, timeframe, claim=claim)
         h = ActiveIndicator(name, params, symbol, timeframe)
+        fine = h.ind.input_timeframe
+        if fine is not None:  # 细粒度输入（决策 0018）：另外订阅输入周期，不回调策略
+            self.subscribe(symbol, fine, claim=False)
         upto = self.clock.now() - self.grace
         for out in self.indicators.warm(h.ind, symbol, timeframe, upto, self.cfg.session):
             h.push(out)
+        if fine is not None:
+            self._feeds.setdefault((symbol, fine), []).append(h)
         self._handles.setdefault((symbol, timeframe), []).append(h)
         return h
 
@@ -579,6 +585,8 @@ class BacktestEngine:
     def _publish(self, bar: Bar) -> None:
         key = (bar.symbol, bar.timeframe)
         self._bars.setdefault(key, deque(maxlen=HISTORY_KEEP)).append(bar)
+        for h in self._feeds.get(key, []):
+            h.ind.ingest(bar)
         for h in self._handles.get(key, []):
             h.push(h.ind.update(bar), bar.ts_start)
         for listener in self.bar_listeners:

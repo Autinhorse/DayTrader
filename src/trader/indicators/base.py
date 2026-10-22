@@ -5,6 +5,12 @@
 - 连续指标（continuous）跨交易日延续；会话指标（session）在每个交易日开始时由框架调用
   on_session_open(day) 重新开始。day 提供该交易日各时段的起止时间（例如常规时段开盘时刻）。
 - 没有通用的 reset：需要从头计算时，框架新建实例并重新预热。
+- 细粒度输入（决策 0018）：input_timeframe 不为空的指标（例如 "1s"），框架先用 ingest(bar)
+  按时间顺序喂入该周期的 bar，再在每根显示周期的 bar 收盘时调用 update(bar) 取值；同一时刻
+  先喂入细 bar。于是 5 分钟图上的值也是用 1 秒 bar 算的，且只含该 bar 收盘之前的数据。
+  显示周期等于输入周期时两者都调用。
+  批量计算历史时框架改用 ingest_batch（一段 bar 的数组，没有 session、trades），默认逐根转给
+  ingest；指标可以覆盖它加速，但结果必须与逐根 ingest 相同（引擎逐根喂入）。
 """
 
 from __future__ import annotations
@@ -14,11 +20,12 @@ import importlib.util
 import pkgutil
 import sys
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar, Literal
 
+import numpy as np
 from pydantic import BaseModel, ConfigDict
 
 from trader.core.models import Bar
@@ -42,6 +49,40 @@ class OutputSpec:
     color: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class BarBatch:
+    """按时间排序的一段 bar（细粒度输入的批量喂入用），各列为等长 numpy 数组。"""
+
+    symbol: str
+    timeframe: str
+    ts_start: np.ndarray
+    ts_end: np.ndarray
+    open: np.ndarray
+    high: np.ndarray
+    low: np.ndarray
+    close: np.ndarray
+    volume: np.ndarray
+    vwap: np.ndarray  # 缺失为 nan
+
+    def __len__(self) -> int:
+        return len(self.ts_start)
+
+    def slice(self, i: int, j: int) -> BarBatch:
+        return BarBatch(
+            self.symbol, self.timeframe, self.ts_start[i:j], self.ts_end[i:j], self.open[i:j],
+            self.high[i:j], self.low[i:j], self.close[i:j], self.volume[i:j], self.vwap[i:j],
+        )  # fmt: skip
+
+    def bars(self) -> Iterator[Bar]:
+        for k in range(len(self)):
+            vw = float(self.vwap[k])
+            yield Bar(
+                self.symbol, self.timeframe, int(self.ts_start[k]), float(self.open[k]),
+                float(self.high[k]), float(self.low[k]), float(self.close[k]),
+                float(self.volume[k]), None if vw != vw else vw, None, None, int(self.ts_end[k]),
+            )  # fmt: skip
+
+
 class IndicatorParams(BaseModel):
     """参数模型基类：未知参数报错。"""
 
@@ -54,6 +95,7 @@ class Indicator(ABC):
     outputs: ClassVar[list[OutputSpec]]  # 每条输出序列的名称与绘图方式
     scope: ClassVar[Literal["continuous", "session"]] = "continuous"
     description: ClassVar[str] = ""
+    input_timeframe: ClassVar[str | None] = None  # 细粒度输入周期，见模块说明
 
     def __init__(self, params: IndicatorParams) -> None:
         self.params = params
@@ -67,6 +109,14 @@ class Indicator(ABC):
 
     def on_session_open(self, day: TradingDay) -> None:  # noqa: B027  会话指标按需覆盖
         """仅会话指标：每个交易日开始时由框架调用。"""
+
+    def ingest(self, bar: Bar) -> None:  # noqa: B027  细粒度输入的指标覆盖
+        """仅 input_timeframe 不为空的指标：每根输入周期的收盘 bar 调用一次，只更新状态。"""
+
+    def ingest_batch(self, batch: BarBatch) -> None:
+        """批量喂入（历史计算用）。默认逐根调用 ingest；覆盖时结果必须相同。"""
+        for bar in batch.bars():
+            self.ingest(bar)
 
 
 # ---------- 注册 ----------

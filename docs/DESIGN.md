@@ -412,6 +412,9 @@ class Indicator(ABC):
     @abstractmethod
     def update(self, bar: Bar) -> dict[str, float | None]: ...   # 每根收盘 bar 调用一次
     def on_session_open(self, day: TradingDay) -> None: ...   # 仅 session 指标：每个交易日开始时调用，day 提供各时段起止
+    input_timeframe: ClassVar[str | None] = None   # 细粒度输入（决策 0018），例如 "1s"
+    def ingest(self, bar: Bar) -> None: ...  # 仅细粒度输入：每根输入周期的收盘 bar，只更新状态
+    def ingest_batch(self, batch: BarBatch) -> None: ...   # 批量计算历史时用，结果必须与逐根 ingest 相同
 
 @dataclass(frozen=True)
 class WarmupSpec:
@@ -433,6 +436,9 @@ class OutputSpec:
 - **会话指标**（`session`，如按日锚定的 VWAP、开盘区间高低点）在每个交易日开盘时由框架调用 `on_session_open` 重新开始。
 - 指标实例没有通用的 `reset`。需要从头计算时（回放跳转、重启），框架丢弃旧实例，新建实例并重新预热。
 - 指标可以依赖其他指标（如 MACD 依赖 EMA），在构造函数中组合。
+- **细粒度输入**（决策 0018）：声明 `input_timeframe`（例如 `"1s"`）的指标，框架先按时间顺序用 `ingest` 喂入该周期的 bar，
+  再在每根显示周期的 bar 收盘时调用 `update` 取值，同一时刻先喂细 bar。5 分钟图上的值因此也用 1 秒 bar 算，且只含该 bar
+  收盘之前的数据；图表（批量 `ingest_batch`）、回测、回放、实盘（逐根 `ingest`）结果相同。Volume Profile 指标用它。
 
 ### 6.3 注册与自定义指标
 
@@ -445,6 +451,8 @@ class OutputSpec:
 ### 6.4 内置指标（第一版）
 
 SMA、EMA、VWAP（按交易日锚定）、布林带、RSI、MACD、ATR、成交量均线、开盘区间高低点、前一日高低收。
+之后加入：Volume Profile 关键价位 `vp_levels`（前一日或 N 日合并的 POC / VAH / VAL）、`vp_developing`（当天滚动的 POC / 价值区），
+都用 1 秒 bar 计算（决策 0017、0018）。
 
 ### 6.5 指标计算服务
 

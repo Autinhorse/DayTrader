@@ -6,22 +6,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import polars as pl
 
 from trader.config import load_universe
 from trader.core.aggregation import SUPPORTED_TIMEFRAMES
 from trader.core.clock import WallClock
-from trader.core.timeutil import NS_PER_SEC, from_ns, ny_date
+from trader.core.timeutil import NS_PER_SEC, NY, from_ns, ny_date, to_ns
 from trader.core.trading_calendar import SessionFilter, TradingCalendar, TradingDay
 from trader.data.catalog import Catalog
 from trader.data.history import HistoryService
 from trader.data.indicator_service import IndicatorService
 from trader.indicators.base import get_indicator, list_indicators, load_all
 from trader.strategy.base import list_strategies, load_user_strategies
+
+if TYPE_CHECKING:
+    from trader.analytics.volume_profile import VolumeProfile
 
 TIMEFRAMES = list(SUPPORTED_TIMEFRAMES)
 
@@ -44,6 +47,12 @@ DAYS_PER_LOAD = {
 def today() -> date:
     """纽约的今天（经由 Clock 取时间，不直接读系统时间）。"""
     return ny_date(WallClock(lambda _e: None).now())
+
+
+def from_ny_seconds(t: int) -> int:
+    """ny_seconds 的反函数：图表时间 → UTC 纳秒。"""
+    local = datetime.fromtimestamp(t, UTC).replace(tzinfo=None)
+    return to_ns(local.replace(tzinfo=NY))
 
 
 def ny_seconds(ts_ns: int) -> int:
@@ -108,7 +117,18 @@ class Services:
         self.indicators = IndicatorService(self.history)
         self.runs_dir = project_dir / "runs"
         self.load_errors: dict[str, str] = {}
+        self._profiles: VolumeProfile | None = None
         self.reload_user_code()
+
+    def profiles(self) -> VolumeProfile:
+        """成交量分布（研究模块，第一次用时创建；坏数据时段清单取项目的 config）。"""
+        if self._profiles is None:
+            from trader.analytics.cleaning import load_bad_windows
+            from trader.analytics.volume_profile import ProfileParams, VolumeProfile
+
+            bad = load_bad_windows(self.project_dir / "config" / "bad_data_windows.yaml")
+            self._profiles = VolumeProfile(ProfileParams(bad_windows=bad), self.history)
+        return self._profiles
 
     # ---------- 用户代码 ----------
 

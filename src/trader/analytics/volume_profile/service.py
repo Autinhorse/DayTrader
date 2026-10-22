@@ -28,7 +28,7 @@ from trader.analytics.volume_profile.day import (
 from trader.analytics.volume_profile.params import ProfileParams
 from trader.analytics.volume_profile.store import ProfileStore
 from trader.core import volume_profile as vp
-from trader.core.timeutil import NY, from_ns, ny_to_ns, timeframe_ns
+from trader.core.timeutil import NY, from_ns, ny_date, ny_to_ns, timeframe_ns
 from trader.core.trading_calendar import TradingDay
 from trader.data.history import HistoryService
 
@@ -275,6 +275,40 @@ class VolumeProfile:
             return int(dt.timestamp() * 1e9)
         return self.cal.trading_day(as_date(anchor)).open
 
+    def between(self, symbol: str, start: int, end: int) -> WindowProfile:
+        """start ~ end（UTC 纳秒）之间已收盘的 bar（只取 session 参数的时段），价格口径为区间内
+        最后一个交易日。整天都在区间内的日子直接用缓存；只覆盖一部分的日子按 developing 的规则
+        （只用 end 之前已收盘的 bar、只用 end 之前的数据清洗）。图表的“可见范围”“每日”和回放用。"""
+        symbol = symbol.upper()
+        tds = self.store.days_between(symbol, ny_date(start), ny_date(max(start, end - 1)))
+        tds = [d for d in tds if d.start < end and d.end > start]
+        segs = session_segments(self.p.session, self.p)
+        parts, used, src = [], [], "1s"
+        t = tds[-1].day if tds else ny_date(start)
+        for d in tds:
+            if start <= d.start and end >= d.end:
+                g = self.store.day(symbol, d)
+                if g is not None and g.stats.source_bar != "1s":
+                    src = g.stats.source_bar
+                parts.append(self._day_grid(symbol, d, t))
+            else:
+                f = self._prefix_grid(symbol, d, min(end, d.end), segs, since=start)
+                parts.append(f.split_adjusted(self.store.factor(symbol, d.day, t)))
+                src = self._bars(symbol, d).source_bar
+            used.append(d.day)
+        span = {"start": from_ns(start).isoformat(), "end": from_ns(end).isoformat()}
+        return WindowProfile(symbol, t, "range", span, vp.merge(parts), end, tuple(used), src)
+
+    def binned(self, w: WindowProfile) -> RangeProfile:
+        """窗口分格后的成交量与关键价位。格子大小和价值区参考价与 levels_of 相同（T 开盘时已知）；
+        没有 ADR 和前一日收盘价时（数据的第一天）格子按分布中间的价格取 bin_pct。"""
+        adr = self.adr(w.symbol, w.day)
+        ref = self.prev_close(w.symbol, w.day)
+        ext = w.fine.extent()
+        mid = (ext[0] + ext[1]) / 200 if ext else math.nan  # extent 是分
+        size = self.bin_size(adr, ref if math.isfinite(ref) else mid)
+        return _range_profile(w.fine, size, self._levels(w.fine, size, ref), adr, w.days)
+
     # ---------- 关键价位 ----------
 
     def levels_of(self, w: WindowProfile) -> dict[str, Any]:
@@ -396,22 +430,10 @@ class VolumeProfile:
         g = self.store.day(symbol, tds[-1]) if tds else None
         ref = g.stats.rth_close / self.store.factor(symbol, tds[-1].day, e) if g else math.nan
         size = round(bin_size * 100) if bin_size else self.bin_size(adr, ref)
-        b = vp.rebin(fp, size)
-        idx = np.arange(len(b.vol))
-        bins = pd.DataFrame(
-            {
-                "price_low": b.low(idx),
-                "price_high": b.high(idx),
-                "price_mid": b.mid(idx),
-                "volume": b.vol,
-            }  # fmt: skip
-        )
         pc = math.nan
         if tds:  # 区间第一天的前一日收盘价，换算到 end 的口径
             pc = self.prev_close(symbol, tds[0].day) / self.store.factor(symbol, tds[0].day, e)
-        return RangeProfile(
-            bins, self._levels(fp, size, pc), fp, size / 100, adr, tuple(d.day for d in tds)
-        )
+        return _range_profile(fp, size, self._levels(fp, size, pc), adr, tuple(d.day for d in tds))
 
     def day_levels(
         self, symbol: str, day: str | date, session: str | None = None
@@ -493,6 +515,18 @@ class VolumeProfile:
                     row[f"d_{k}_adr"] = (b[k] - a[k]) / adr if adr > 0 else math.nan
                 rows.append(row)
         return pd.DataFrame(rows)
+
+
+def _range_profile(
+    fp: vp.FineProfile, size: int, lv: vp.Levels | None, adr: float, days: tuple[date, ...]
+) -> RangeProfile:
+    b = vp.rebin(fp, size)
+    idx = np.arange(len(b.vol))
+    bins = pd.DataFrame(
+        {"price_low": b.low(idx), "price_high": b.high(idx), "price_mid": b.mid(idx),
+         "volume": b.vol}
+    )  # fmt: skip
+    return RangeProfile(bins, lv, fp, size / 100, adr, days)
 
 
 def _row(

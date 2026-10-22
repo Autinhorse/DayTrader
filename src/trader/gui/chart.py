@@ -1,4 +1,4 @@
-"""图表窗口：工具栏（标的、周期、时段、指标、跳转、联动）+ Lightweight Charts。
+"""图表窗口：工具栏（标的、周期、时段、指标、跳转、联动、成交量分布）+ Lightweight Charts。
 
 每个图表窗口独立；可以开任意多个，拖出主窗口单独放置。向左拖到头时自动加载更早的数据。
 """
@@ -26,8 +26,17 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from trader.core.timeutil import timeframe_ns
 from trader.core.trading_calendar import TradingDay
-from trader.gui.services import TIMEFRAMES, IndicatorSpec, Services, ny_seconds, today
+from trader.gui.services import (
+    TIMEFRAMES,
+    IndicatorSpec,
+    Services,
+    from_ny_seconds,
+    ny_seconds,
+    today,
+)
+from trader.gui.volume_overlay import MODES, profile_payload
 
 ASSETS = Path(__file__).resolve().parent / "assets"
 
@@ -35,6 +44,7 @@ ASSETS = Path(__file__).resolve().parent / "assets"
 class _Bridge(QObject):
     ready_signal = Signal()
     more_signal = Signal()
+    range_signal = Signal(int, int)
 
     @Slot()
     def ready(self) -> None:
@@ -43,6 +53,11 @@ class _Bridge(QObject):
     @Slot()
     def needMore(self) -> None:  # noqa: N802  JS 端调用的名字
         self.more_signal.emit()
+
+    @Slot(int, int)
+    def visibleRange(self, first: int, last: int) -> None:  # noqa: N802
+        """可见范围内第一根和最后一根 K 线的时间（图表时间）。"""
+        self.range_signal.emit(first, last)
 
 
 class ChartView(QWebEngineView):
@@ -95,6 +110,7 @@ class ChartWidget(QWidget):
         self.days: list[TradingDay] = []
         self.overlay_fills: pl.DataFrame | None = None  # 联动显示的回测成交
         self.overlay_label = ""
+        self._visible: tuple[int, int] | None = None  # 可见范围（UTC 纳秒）
 
         self.sym_box = QComboBox()
         self.sym_box.setEditable(True)
@@ -122,6 +138,16 @@ class ChartWidget(QWidget):
             "右侧显示鼠标所在 K 线的价格和全部指标数值；双击或右键 K 线弹出详细信息"
         )
         self.data_win.setChecked(cfg.get("data_window", True))
+        self.prof_box = QComboBox()
+        for code, name in MODES:
+            self.prof_box.addItem(name, code)
+        i = self.prof_box.findData(cfg.get("profile", "off"))
+        self.prof_box.setCurrentIndex(max(i, 0))
+        self.prof_box.setToolTip(
+            "成交量分布（Volume Profile）：在图上画出各价位的成交量，只算常规时段（1 秒 bar）。\n"
+            "今日 / 前一日 / 前N日合并 / 可见范围 画在图的右侧，每日 画在每天自己的位置；\n"
+            "红色格子是 POC，蓝色是价值区（70% 成交量）。回放中只用回放时钟之前的数据。"
+        )
         bar = QHBoxLayout()
         for w in (
             self.sym_box,
@@ -133,6 +159,8 @@ class ChartWidget(QWidget):
             self.link,
             clear_btn,
             self.data_win,
+            QLabel("分布"),
+            self.prof_box,
         ):
             bar.addWidget(w)
         bar.addStretch()
@@ -158,6 +186,8 @@ class ChartWidget(QWidget):
         self.data_win.toggled.connect(lambda on: self.view.call("setDataWindow", on))
         self.view.call("setDataWindow", self.data_win.isChecked())
         self.view.bridge.more_signal.connect(self.load_more)
+        self.view.bridge.range_signal.connect(self._on_visible)
+        self.prof_box.activated.connect(lambda _i: self.update_profile())
         self.load(None)
 
     # ---------- 配置 ----------
@@ -173,6 +203,7 @@ class ChartWidget(QWidget):
             ],
             "linked": self.link.isChecked(),
             "data_window": self.data_win.isChecked(),
+            "profile": self.profile_mode(),
         }
 
     def title(self) -> str:
@@ -238,6 +269,8 @@ class ChartWidget(QWidget):
         if focus is not None:
             p["range"] = [ny_seconds(focus[0]), ny_seconds(focus[1])]
         self.view.call("setData", p)
+        self._visible = None
+        self.update_profile()
         if self.days:
             self.status.setText(
                 f"{self.days[0].day} ~ {self.days[-1].day}，{len(p['candles']):,} 根；"
@@ -245,6 +278,50 @@ class ChartWidget(QWidget):
             )
         else:
             self.status.setText("没有数据")
+
+    # ---------- 成交量分布 ----------
+
+    def profile_mode(self) -> str:
+        return self.prof_box.currentData() or "off"
+
+    def profile_days(self) -> list[TradingDay]:
+        """图上的交易日，最后一个是“今日”。"""
+        return self.days
+
+    def profile_until(self) -> int | None:
+        """分布可用数据的截止时刻；回放中是回放时钟。"""
+        return None
+
+    def update_profile(self) -> None:
+        mode = self.profile_mode()
+        if mode == "visible" and self._visible is None:
+            # 先让页面报告可见范围，收到后再算（_on_visible）
+            self.view.call("setProfile", {"mode": mode, "profiles": [], "request": True})
+            return
+        try:
+            p = profile_payload(
+                self.sv.profiles(), self.symbol, mode, self.profile_days(),
+                self.profile_until(), self._visible,
+            )  # fmt: skip
+        except Exception as e:  # 分布出错不影响图表其他部分
+            self.status.setText(f"成交量分布出错：{e}")
+            p = {"mode": "off", "profiles": []}
+        p["request"] = mode == "visible"
+        self.view.call("setProfile", p)
+
+    def _on_visible(self, first: int, last: int) -> None:
+        a, b = from_ny_seconds(first), from_ny_seconds(last)
+        if self.timeframe == "1d":
+            d0, d1 = self.sv.cal.trading_date_of(a), self.sv.cal.trading_date_of(b)
+            a = self.sv.cal.trading_day(d0).start if d0 else a
+            b = self.sv.cal.trading_day(d1).end if d1 else b
+        else:
+            b += timeframe_ns(self.timeframe)
+        if self._visible == (a, b):
+            return
+        self._visible = (a, b)
+        if self.profile_mode() == "visible":
+            self.update_profile()
 
     # ---------- 回测联动 ----------
 

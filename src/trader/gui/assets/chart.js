@@ -1,5 +1,5 @@
 // 图表页面：由 Python（trader.gui.chart）通过 runJavaScript 调用 window.api，
-// 通过 QWebChannel 的 bridge 对象回报用户操作（向左拖到头时请求更早的数据）。
+// 通过 QWebChannel 的 bridge 对象回报用户操作（向左拖到头时请求更早的数据、可见范围变化）。
 // 时间一律是“纽约当地时间的秒数”（Python 已换算），图上显示的就是美东时间。
 (function () {
   const LWC = LightweightCharts;
@@ -26,6 +26,12 @@
   let dataWindow = false;
   let lastTime = null; // 十字线所在的时间；null 表示鼠标不在图上
   let popupAt = null; // 弹出窗口出现时的鼠标位置
+  let lastPrice = null; // 十字线所在的价格
+  // 成交量分布：{mode, profiles: [{label, t0, t1, low, size, vol, poc_i, va, poc, vah, val, total}]}
+  let profile = { mode: "off", profiles: [] };
+  let profileUpdate = null; // 通知图表重画
+  let profileLines = [];
+  let rangeTimer = null;
   const palette = ["#2962ff", "#ff9800", "#e91e63", "#00bcd4", "#9c27b0", "#8bc34a", "#ffeb3b", "#795548"];
 
   new QWebChannel(qt.webChannelTransport, function (channel) {
@@ -59,6 +65,8 @@
     candleMap = new Map();
     volMap = new Map();
     groups = [];
+    profileUpdate = null;
+    profileLines = [];
     hidePopup();
     chart.subscribeCrosshairMove(onCrosshair);
     chart.timeScale().subscribeVisibleLogicalRangeChange(onRange);
@@ -107,7 +115,7 @@
   }
 
   // 某根 K 线的全部信息（数据窗口和弹出窗口共用）；withMarkers 为真时附上这根 K 线的标记（成交等）
-  function infoHtml(t, withMarkers) {
+  function infoHtml(t, withMarkers, price) {
     if (t === null || t === undefined) return "";
     const c = candleMap.get(t);
     let html = `<div class="h">${fmtTime(t)}</div>`;
@@ -134,6 +142,7 @@
                     fmt(it.map.get(t)));
       }
     }
+    html += profileHtml(t, price);
     if (withMarkers) {
       const ms = markerList.filter(function (m) { return m.time === t && m.text; });
       if (ms.length) {
@@ -147,11 +156,11 @@
   function renderDataWindow() {
     if (!dataWindow) return;
     const t = lastTime !== null ? lastTime : (times.length ? times[times.length - 1] : null);
-    datawin.innerHTML = infoHtml(t, false);
+    datawin.innerHTML = infoHtml(t, false, lastTime !== null ? lastPrice : null);
   }
 
-  function showPopup(t, point) {
-    const html = infoHtml(t, true);
+  function showPopup(t, point, price) {
+    const html = infoHtml(t, true, price);
     if (!html) return;
     popup.innerHTML = html;
     popup.style.display = "block";
@@ -188,7 +197,7 @@
     const c0 = ts.timeToCoordinate(times[lo]);
     const c1 = lo > 0 ? ts.timeToCoordinate(times[lo - 1]) : null;
     if (c1 !== null && c0 !== null && Math.abs(c1 - x) < Math.abs(c0 - x)) best = lo - 1;
-    showPopup(times[best], { x: e.clientX, y: e.clientY });
+    showPopup(times[best], { x: e.clientX, y: e.clientY }, candle ? candle.coordinateToPrice(y) : null);
   }
   document.addEventListener("contextmenu", function (e) { e.preventDefault(); popupHere(e); });
   // 双击自己判断（450 毫秒内、几乎同一位置的两次左键按下），不依赖浏览器的 dblclick 事件
@@ -214,6 +223,7 @@
   function onCrosshair(param) {
     const has = param && param.time !== undefined && param.point;
     lastTime = has ? param.time : null;
+    lastPrice = has && candle ? candle.coordinateToPrice(param.point.y) : null;
     renderDataWindow();
     if (!has) { legend.innerHTML = window._title || ""; return; }
     let html = (window._title || "") + "<br>";
@@ -232,11 +242,137 @@
   }
 
   function onRange(range) {
+    reportRange();
     if (!range || !bridge || loadingMore || mode !== "price") return;
     if (range.from < 10) { // 拖到最左边：向 Python 要更早的数据
       loadingMore = true;
       bridge.needMore();
     }
+  }
+
+  // ---------- 成交量分布（横向柱）----------
+
+  const PROFILE_COLORS = { out: "rgba(120,144,156,0.30)", va: "rgba(41,98,255,0.38)",
+                           poc: "rgba(239,83,80,0.80)" };
+
+  function firstIndexAtOrAfter(t) {
+    let lo = 0, hi = times.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (times[mid] < t) lo = mid + 1; else hi = mid; }
+    return lo;
+  }
+
+  // 一个分布占的横向区域（像素）：右侧的从右往左长，每日的从当天第一根 K 线往右长
+  function profileBox(p, W) {
+    if (p.t0 === null || p.t0 === undefined) {
+      const w = Math.min(Math.max(W * 0.22, 80), 360);
+      return { x: W - w - 2, w: w, right: true };
+    }
+    const i0 = firstIndexAtOrAfter(p.t0), i1 = firstIndexAtOrAfter(p.t1) - 1;
+    if (i0 >= times.length || i1 < i0) return null;
+    const ts = chart.timeScale();
+    const x0 = ts.logicalToCoordinate(i0), x1 = ts.logicalToCoordinate(i1);
+    if (x0 === null || x1 === null || x1 < 0 || x0 > W) return null;
+    return { x: x0, w: Math.max(x1 - x0, 6) * 0.95, right: false };
+  }
+
+  function drawProfile(ctx, p, W, hr, vr) {
+    const box = profileBox(p, W);
+    if (!box || !p.vol.length) return;
+    let max = 0;
+    for (const v of p.vol) if (v > max) max = v;
+    if (!max) return;
+    for (let i = 0; i < p.vol.length; i++) {
+      const v = p.vol[i];
+      if (!v) continue;
+      // 格子 i 覆盖 low + i × size 起的 size 美元（价位以分为单位，上下各让半分连成一片）
+      const lo = p.low + i * p.size - 0.005;
+      const yTop = candle.priceToCoordinate(lo + p.size), yBot = candle.priceToCoordinate(lo);
+      if (yTop === null || yBot === null) continue;
+      const top = Math.round(yTop * vr), bot = Math.round(yBot * vr);
+      const h = Math.max(1, bot - top - (bot - top > 3 ? 1 : 0));
+      const len = (v / max) * box.w;
+      const x = box.right ? box.x + box.w - len : box.x;
+      ctx.fillStyle = i === p.poc_i ? PROFILE_COLORS.poc
+        : i >= p.va[0] && i <= p.va[1] ? PROFILE_COLORS.va : PROFILE_COLORS.out;
+      ctx.fillRect(Math.round(x * hr), top, Math.max(1, Math.round(len * hr)), h);
+    }
+  }
+
+  const profilePrimitive = {
+    attached: function (param) { profileUpdate = param.requestUpdate; },
+    detached: function () { profileUpdate = null; },
+    updateAllViews: function () {},
+    paneViews: function () {
+      return [{
+        zOrder: function () { return "bottom"; }, // 画在 K 线下面
+        renderer: function () {
+          return {
+            draw: function (target) {
+              if (!candle || !profile.profiles.length) return;
+              target.useBitmapCoordinateSpace(function (scope) {
+                for (const p of profile.profiles) {
+                  drawProfile(scope.context, p, scope.mediaSize.width, scope.horizontalPixelRatio,
+                              scope.verticalPixelRatio);
+                }
+              });
+            },
+          };
+        },
+      }];
+    },
+  };
+
+  // 画在右侧的分布：在价格轴上标出 POC、VAH、VAL
+  function refreshProfileLines() {
+    if (!candle) return;
+    for (const l of profileLines) candle.removePriceLine(l);
+    profileLines = [];
+    const ps = profile.profiles;
+    const p = ps.length === 1 && (ps[0].t0 === null || ps[0].t0 === undefined) ? ps[0] : null;
+    if (!p) return;
+    for (const [title, price, color] of [["POC", p.poc, "#ef5350"], ["VAH", p.vah, "#2962ff"],
+                                          ["VAL", p.val, "#2962ff"]]) {
+      profileLines.push(candle.createPriceLine({ price: price, color: color, lineVisible: false,
+                                                 axisLabelVisible: true, title: title }));
+    }
+  }
+
+  // 鼠标所在时间、价格对应的分布信息
+  function profileHtml(t, price) {
+    const ps = profile.profiles;
+    if (!ps.length) return "";
+    let p = null;
+    for (const x of ps) {
+      if (x.t0 === null || x.t0 === undefined || (t !== null && t >= x.t0 && t < x.t1)) { p = x; break; }
+    }
+    if (!p) return "";
+    let html = `<div class="h" title="${esc(p.label)}">成交量分布 · ${esc(p.label)}</div>`;
+    html += row(`<span class="sw" style="background:${PROFILE_COLORS.poc}"></span>POC`, fmt(p.poc));
+    html += row(`<span class="sw" style="background:${PROFILE_COLORS.va}"></span>VAH`, fmt(p.vah));
+    html += row(`<span class="sw" style="background:${PROFILE_COLORS.va}"></span>VAL`, fmt(p.val));
+    html += row("合计量", fmtVol(p.total));
+    if (price !== null && price !== undefined) {
+      const i = Math.floor((price - p.low + 0.005) / p.size);
+      if (i >= 0 && i < p.vol.length) {
+        const lo = p.low + i * p.size;
+        html += row(`${fmt(lo)}~${fmt(lo + p.size - 0.01)}`,
+                    `${fmtVol(p.vol[i])}（${((p.vol[i] / p.total) * 100).toFixed(1)}%）`);
+      }
+    }
+    return html;
+  }
+
+  // 可见范围变化时（停下 0.3 秒后）告诉 Python 第一根和最后一根可见 K 线的时间
+  function reportRange() {
+    if (!bridge || !chart || profile.mode !== "visible" || !times.length) return;
+    clearTimeout(rangeTimer);
+    rangeTimer = setTimeout(function () {
+      const r = chart.timeScale().getVisibleLogicalRange();
+      if (!r) return;
+      const a = Math.max(0, Math.min(times.length - 1, Math.ceil(r.from)));
+      const b = Math.max(0, Math.min(times.length - 1, Math.floor(r.to)));
+      if (b >= a) bridge.visibleRange(times[a], times[b]);
+    }, 300);
   }
 
   function lineOpts(o, color) {
@@ -263,6 +399,7 @@
       }, 0);
       candle.setData(p.candles);
       for (const c of p.candles) { candleMap.set(c.time, c); pushTime(c.time); }
+      candle.attachPrimitive(profilePrimitive);
       let pane = 1;
       if (p.volume && p.volume.length) {
         const vol = chart.addSeries(LWC.HistogramSeries, {
@@ -352,6 +489,15 @@
     setDataWindow: function (on) {
       dataWindow = !!on;
       document.body.classList.toggle("dw", dataWindow);
+      renderDataWindow();
+    },
+
+    // 成交量分布；request 为真时（可见范围模式）回报当前可见范围
+    setProfile: function (p) {
+      profile = { mode: p.mode || "off", profiles: p.profiles || [] };
+      refreshProfileLines();
+      if (profileUpdate) profileUpdate();
+      if (p.request) reportRange();
       renderDataWindow();
     },
 

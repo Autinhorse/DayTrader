@@ -33,7 +33,8 @@ from PySide6.QtWidgets import (
 
 from trader.backtest.replay import ReplaySession, ReplaySettings
 from trader.core.models import Bar
-from trader.core.timeutil import NS_PER_MS, from_ns, ny_to_ns
+from trader.core.timeutil import NS_PER_DAY, NS_PER_MS, NS_PER_SEC, from_ns, ny_to_ns
+from trader.core.trading_calendar import TradingDay
 from trader.gui.chart import ChartWidget
 from trader.gui.forms import ModelForm
 from trader.gui.services import Services, indicator_series, ny_seconds, today
@@ -42,6 +43,7 @@ from trader.strategy.base import get_strategy
 
 SPEEDS = [1, 2, 5, 10, 30, 60, 120, 300, 900]
 TICK_MS = 100  # 界面刷新间隔
+PROFILE_EVERY = 5 * NS_PER_SEC  # 播放中成交量分布每隔这么久（回放时间）重算一次
 
 
 def _bar_point(b: Bar) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -62,6 +64,7 @@ class ReplayChart(ChartWidget):
         self._sent_fills = 0
         self._listener_engine: Any = None
         self.lookback = 2  # 往前显示几个交易日（向左拖到头时增加）
+        self._prof_at = 0  # 成交量分布上次计算时的回放时钟
         super().__init__(sv, config)
         self.link.setChecked(False)
         self.link.setVisible(False)
@@ -158,6 +161,9 @@ class ReplayChart(ChartWidget):
                 "minMove": 0.01 if last >= 1 else 0.0001,
             },
         )
+        self._visible = None
+        self._prof_at = rs.now
+        self.update_profile()
         self.status.setText(
             f"回放时钟 {from_ns(rs.now):%Y-%m-%d %H:%M:%S}（纽约时间）　只显示此刻之前已收盘的数据"
         )
@@ -213,7 +219,25 @@ class ReplayChart(ChartWidget):
                 "follow": follow,
             },
         )
+        # 前一日、前N日合并当天不变；其余的随回放时钟重算
+        if self.profile_mode() in ("today", "visible", "daily") and (
+            rs.now - self._prof_at >= PROFILE_EVERY or rs.finished
+        ):
+            self._prof_at = rs.now
+            self.update_profile()
         self.status.setText(f"回放时钟 {from_ns(rs.now):%Y-%m-%d %H:%M:%S}（纽约时间）")
+
+    def profile_days(self) -> list[TradingDay]:
+        rs = self.rs
+        if rs is None:
+            return []
+        # 与 rs.bars 相同：往前 lookback 个自然日
+        first = from_ns(rs.day_start - self.lookback * NS_PER_DAY).date()
+        return self.sv.cal.trading_days(first, rs.day.day)
+
+    def profile_until(self) -> int | None:
+        rs = self.rs
+        return rs.now if rs is not None else 0
 
     def _changed(self) -> None:
         self.symbol = self.sym_box.currentText().strip().upper()

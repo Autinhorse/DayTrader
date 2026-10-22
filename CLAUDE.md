@@ -63,6 +63,8 @@ Volume Profile（决策 0017，规范 docs/volume_profile_spec.md）：纯计算
 notebook `user/notebooks/Volume Profile.ipynb`，命令 `uv run trader profile levels --symbol NVDA --date 2026-10-15`。
 图表指标 `vp_levels`、`vp_developing`：细粒度输入（决策 0018，`Indicator.input_timeframe` + `ingest` / `ingest_batch`），
 1 秒 bar 计算、按图表周期取值。
+图上的横向成交量分布：`trader.gui.volume_overlay.profile_payload`（工具栏“分布”），数据来自 `VolumeProfile.between / binned`，
+页面端是 chart.js 里的 series primitive。
 历史数据分析的结论汇总在 `docs/研究记录.md`（做了什么、结论、怎么得到、数据文件）；每轮分析有值得保留的结论就追加一节并更新总览。
 实盘版（阶段 6，决策 0007）：`trader.live.runner.LiveRunner` + `trader.brokers.ibkr`（`api.IbApi` 薄接口，
 测试用 `tests/fake_ib.py`，永不连接真实 IBKR）；实时 1 秒 bar 由 `trader.data.bar_builder` 生成，
